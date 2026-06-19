@@ -1,0 +1,26 @@
+{
+  "camera": {
+    "device": "/dev/video20",
+    "width": 640,
+    "height": 480,
+    "fps": 15
+  },
+  "model": {
+    "path": "model/yolov8s.rknn",
+    "conf_threshold": 0.15,
+    "iou_threshold": 0.45
+  },
+  "detection": {
+    "target_classes": ["cell phone", "cup", "keyboard", "mouse", "laptop", "book"],
+    "report_interval_sec": 1
+  },
+  "stream": {
+    "rtmp_url": "rtmp://<YOUR_SRS_SERVER_IP>/live/desk"
+  },
+  "mqtt": {
+    "broker": "<YOUR_MQTT_BROKER_IP>",
+    "port": 1883,
+    "topic": "desk/detect",
+    "client_id": "AlertGateway-01"
+  }
+}

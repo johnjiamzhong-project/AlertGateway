@@ -1,0 +1,18 @@
+# build artifacts
+build/
+
+# local Claude Code settings (machine-specific permissions, paths)
+.claude/settings.local.json
+
+# vendored prebuilt binaries (Rockchip/proprietary, no redistribution license bundled)
+# headers under third_party/*/include are kept, only compiled libs are ignored
+third_party/**/*.so
+third_party/**/*.so.*
+
+# model weights (large binary, not meant for git history)
+model/*.rknn
+model/*.onnx
+
+# editor/OS noise
+.vscode/
+.DS_Store

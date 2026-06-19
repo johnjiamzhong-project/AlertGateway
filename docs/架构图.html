@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>AlertGateway 软件架构图</title>
+<style>
+  :root{
+    --c-capture:#3b6fd6;
+    --c-infer:#8b5cc7;
+    --c-encode:#d6843b;
+    --c-stream:#3bb273;
+    --c-mqtt:#2aa7a0;
+    --c-ext:#6b7280;
+    --c-queue:#94a3b8;
+    --bg:#f5f6f8;
+    --card-bg:#ffffff;
+    --text:#1f2430;
+    --muted:#6b7280;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    padding:40px 24px 80px;
+    background:var(--bg);
+    font-family:"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;
+    color:var(--text);
+  }
+  h1{
+    text-align:center;
+    font-size:26px;
+    margin:0 0 6px;
+  }
+  .subtitle{
+    text-align:center;
+    color:var(--muted);
+    font-size:13px;
+    margin:0 0 48px;
+  }
+  .section-title{
+    font-size:18px;
+    font-weight:600;
+    border-left:5px solid var(--c-infer);
+    padding-left:10px;
+    margin:64px 0 28px;
+  }
+  /* ---------- 通用模块卡片 ---------- */
+  .node{
+    background:var(--card-bg);
+    border-radius:10px;
+    border:2px solid var(--accent,#999);
+    box-shadow:0 2px 6px rgba(0,0,0,0.06);
+    padding:14px 18px;
+    min-width:200px;
+  }
+  .node .title{
+    font-weight:700;
+    font-size:15px;
+    margin-bottom:6px;
+    display:flex;
+    align-items:center;
+    gap:8px;
+  }
+  .node .badge{
+    display:inline-block;
+    background:var(--accent,#999);
+    color:#fff;
+    border-radius:50%;
+    width:20px;height:20px;
+    line-height:20px;
+    text-align:center;
+    font-size:12px;
+    flex:none;
+  }
+  .node .desc{
+    font-size:12.5px;
+    color:var(--muted);
+    line-height:1.6;
+  }
+  .node .desc code{
+    background:#f1f2f5;
+    border-radius:4px;
+    padding:0 4px;
+    font-size:12px;
+  }
+  .node.capture{--accent:var(--c-capture);}
+  .node.infer{--accent:var(--c-infer);}
+  .node.encode{--accent:var(--c-encode);}
+  .node.stream{--accent:var(--c-stream);}
+  .node.mqtt{--accent:var(--c-mqtt);}
+  .node.ext{--accent:var(--c-ext);}
+  .node.queue{
+    --accent:var(--c-queue);
+    background:#eef1f5;
+    text-align:center;
+    padding:8px 14px;
+    min-width:auto;
+  }
+  .node.queue .title{font-size:13px;justify-content:center;margin-bottom:2px;}
+  .node.queue .desc{font-size:11.5px;}
+
+  /* ---------- 主流程布局 ---------- */
+  .flow{
+    max-width:1180px;
+    margin:0 auto;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+  }
+  .row{
+    display:flex;
+    justify-content:center;
+    gap:60px;
+    width:100%;
+  }
+  .col{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    gap:0;
+    flex:1;
+    max-width:480px;
+  }
+  .arrow-v{
+    color:var(--muted);
+    font-size:22px;
+    line-height:1;
+    margin:6px 0;
+  }
+  .arrow-label{
+    font-size:11.5px;
+    color:var(--muted);
+    text-align:center;
+    margin-top:2px;
+  }
+  .split-line{
+    width:80%;
+    max-width:760px;
+    height:2px;
+    background:var(--muted);
+    opacity:.35;
+    margin:4px 0 0;
+    position:relative;
+  }
+  .split-line::before,.split-line::after{
+    content:"";
+    position:absolute;
+    top:-1px;
+    width:2px;height:22px;
+    background:var(--muted);
+    opacity:.35;
+  }
+  .split-line::before{left:8%;}
+  .split-line::after{right:8%;}
+  .gap{height:14px;}
+
+  /* 跨列引用徽标说明 */
+  .xref-note{
+    font-size:11px;
+    color:var(--c-infer);
+    font-weight:600;
+    margin-top:4px;
+  }
+
+  /* ---------- 详情卡片区 ---------- */
+  .detail-grid{
+    max-width:1180px;
+    margin:0 auto;
+    display:grid;
+    grid-template-columns:repeat(2,1fr);
+    gap:24px;
+  }
+  @media (max-width:900px){.detail-grid{grid-template-columns:1fr;}}
+  .detail-card{
+    background:var(--card-bg);
+    border-radius:10px;
+    border:1px solid #e2e5ea;
+    box-shadow:0 2px 6px rgba(0,0,0,0.05);
+    padding:18px 22px;
+  }
+  .detail-card h3{
+    margin:0 0 10px;
+    font-size:14.5px;
+    display:flex;
+    align-items:center;
+    gap:8px;
+  }
+  .dot{width:10px;height:10px;border-radius:50%;display:inline-block;flex:none;}
+  .detail-card ol{
+    margin:0;
+    padding-left:20px;
+    font-size:12.8px;
+    color:#374151;
+    line-height:1.9;
+  }
+  .detail-card code{
+    background:#f1f2f5;
+    border-radius:4px;
+    padding:0 4px;
+    font-size:12px;
+  }
+
+  /* ---------- 表格 ---------- */
+  table{
+    max-width:1180px;
+    margin:0 auto;
+    width:100%;
+    border-collapse:collapse;
+    font-size:13px;
+    background:var(--card-bg);
+    box-shadow:0 2px 6px rgba(0,0,0,0.05);
+    border-radius:10px;
+    overflow:hidden;
+  }
+  th,td{
+    padding:10px 14px;
+    border-bottom:1px solid #eceef1;
+    text-align:left;
+  }
+  th{
+    background:#eef1f5;
+    font-weight:600;
+  }
+  tr:last-child td{border-bottom:none;}
+
+  /* ---------- 设计要点 ---------- */
+  .points{
+    max-width:1180px;
+    margin:0 auto;
+    background:var(--card-bg);
+    border-radius:10px;
+    box-shadow:0 2px 6px rgba(0,0,0,0.05);
+    padding:22px 30px;
+  }
+  .points ol{
+    margin:0;
+    padding-left:22px;
+    font-size:13.5px;
+    line-height:2.1;
+  }
+  .points b{color:var(--c-infer);}
+  .footer-note{
+    text-align:center;
+    color:var(--muted);
+    font-size:11.5px;
+    margin-top:60px;
+  }
+</style>
+</head>
+<body>
+
+<h1>AlertGateway 详细软件架构图</h1>
+<p class="subtitle">基于当前代码（src/main.cpp 拓扑 + 各线程头文件）整理 · src/detect/DetectionReporter.* 为未编译的死代码，已不出现在图中</p>
+
+<!-- ============ 主流程图 ============ -->
+<div class="flow">
+
+  <div class="node ext" style="--accent:var(--c-ext);text-align:center;">
+    <div class="title">📷 /dev/video20（V4L2 摄像头）</div>
+    <div class="desc">USB 摄像头，YUYV422，硬件实际帧率约 14.6fps</div>
+  </div>
+  <div class="arrow-v">↓</div>
+  <div class="arrow-label">mmap 零拷贝（4 块内核缓冲区）</div>
+
+  <div class="node capture">
+    <div class="title"><span class="badge">C</span>CaptureThread</div>
+    <div class="desc">select 等帧 → DQBUF → 同时投递两条下游队列 → QBUF 归还内核</div>
+  </div>
+
+  <div class="gap"></div>
+  <div class="split-line"></div>
+  <div class="row" style="margin-top:18px;">
+    <div class="col" style="align-items:center;">
+      <div class="arrow-v">↓</div>
+      <div class="node queue">
+        <div class="title">enc_queue</div>
+        <div class="desc">容量=1（~68ms 缓冲）<br>阻塞 push(timeout=100ms)，每帧必达</div>
+      </div>
+    </div>
+    <div class="col" style="align-items:center;">
+      <div class="arrow-v">↓</div>
+      <div class="node queue">
+        <div class="title">infer_queue</div>
+        <div class="desc">容量=2 · 非阻塞 push(timeout=0)<br>InferThread 忙时直接丢帧，始终推理最新帧</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row" style="margin-top:10px;align-items:flex-start;">
+
+    <!-- 编码分支 -->
+    <div class="col">
+      <div class="arrow-v">↓</div>
+      <div class="node encode" style="width:100%;">
+        <div class="title"><span class="badge">E</span>EncodeThread</div>
+        <div class="desc">
+          1. <code>yuyv_to_nv12()</code> 直转（无 RGB 中间步骤）<br>
+          2. <code>draw_rect_nv12()</code> 在 NV12 平面叠检测框<br>
+          3. MPP 硬编 <code>h264_rkmpp</code>（GOP=8，Main profile）
+        </div>
+        <div class="xref-note">① 读取 SharedDetections.get()（见右侧①）</div>
+      </div>
+      <div class="arrow-v">↓</div>
+      <div class="node queue">
+        <div class="title">stream_queue</div>
+        <div class="desc">容量=2（~137ms 缓冲）<br>平滑编码抖动</div>
+      </div>
+      <div class="arrow-v">↓</div>
+      <div class="node stream" style="width:100%;">
+        <div class="title"><span class="badge">S</span>StreamThread</div>
+        <div class="desc">
+          FFmpeg <code>AVFormatContext</code> 推流<br>
+          <code>parse_annexb()</code> 拆 NALU ·首个 IDR 帧发 SPS/PPS extradata<br>
+          <code>reconnect_loop()</code> 断线自动重连
+        </div>
+      </div>
+      <div class="arrow-v">↓</div>
+      <div class="node ext"><div class="title">SRS（Windows）</div><div class="desc">RTMP 服务器<br><code>min_latency on / gop_cache off / queue_length 0.1</code></div></div>
+      <div class="arrow-v">↓</div>
+      <div class="node ext"><div class="title">RambosPlayer（Windows）</div><div class="desc">拉流播放，画面含检测框</div></div>
+    </div>
+
+    <!-- 推理分支 -->
+    <div class="col">
+      <div class="arrow-v">↓</div>
+      <div class="node infer" style="width:100%;">
+        <div class="title"><span class="badge">I</span>InferThread</div>
+        <div class="desc">
+          1. RGA 硬件预处理：letterbox resize，zero-copy 写入 NPU DMA 输入<br>
+          2. <code>rknn_run()</code>（box/cls 双输出张量，分开量化）<br>
+          3. <code>YoloPostprocess</code>：NMS + target_classes 过滤<br>
+          4. <code>set()</code> 写结果 ／ <code>summarize()</code> 生成 JSON 摘要
+        </div>
+      </div>
+
+      <div class="gap"></div>
+      <div class="split-line" style="width:90%;"></div>
+      <div class="row" style="margin-top:14px;width:100%;gap:24px;">
+        <div class="col" style="max-width:none;">
+          <div class="arrow-v">↓</div>
+          <div class="node queue" style="--accent:var(--c-infer);">
+            <div class="title">①SharedDetections</div>
+            <div class="desc">mutex 保护 vector&lt;Detection&gt;<br><code>set()</code>覆盖 / <code>get()</code>拷贝返回</div>
+          </div>
+        </div>
+        <div class="col" style="max-width:none;">
+          <div class="arrow-v">↓</div>
+          <div class="node queue">
+            <div class="title">mqtt_queue</div>
+            <div class="desc">容量=16<br>结果有变化才 push</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="arrow-v" style="margin-top:14px;">↓</div>
+      <div class="node mqtt" style="width:100%;">
+        <div class="title"><span class="badge">M</span>MqttThread</div>
+        <div class="desc">Paho MQTT <code>async_client</code> 发布 JSON 检测摘要</div>
+      </div>
+      <div class="arrow-v">↓</div>
+      <div class="node ext"><div class="title">MQTT Broker</div><div class="desc">192.168.0.168:1883 · topic: desk/detect</div></div>
+      <div class="arrow-v">↓</div>
+      <div class="node ext"><div class="title">MqttMonitor（Windows）</div><div class="desc">检测结果实时显示</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 复杂模块详情 ============ -->
+<div class="section-title">复杂模块详情（拆解显示，避免主图过载）</div>
+<div class="detail-grid">
+
+  <div class="detail-card">
+    <h3><span class="dot" style="background:var(--c-capture);"></span>CaptureThread 内部流程</h3>
+    <ol>
+      <li><code>open_device()</code>：open fd → <code>VIDIOC_S_FMT</code> 设分辨率/YUYV → <code>VIDIOC_S_PARM</code> 设帧率</li>
+      <li><code>init_buffers()</code>：<code>VIDIOC_REQBUFS</code> 申请 4 块内核缓冲区，mmap 映射到用户空间</li>
+      <li><code>start_stream()</code>：全部缓冲区 <code>VIDIOC_QBUF</code> 入队 → <code>VIDIOC_STREAMON</code></li>
+      <li><code>run()</code> 主循环：select 等待可读 → DQBUF 取一帧 → assign 拷贝到 <code>Frame::raw_data</code> → 投递 enc_queue（阻塞）和 infer_queue（非阻塞）→ 立即 QBUF 归还</li>
+      <li>停止时：<code>stop_stream()</code> STREAMOFF → <code>close_device()</code> munmap + close fd</li>
+    </ol>
+  </div>
+
+  <div class="detail-card">
+    <h3><span class="dot" style="background:var(--c-infer);"></span>InferThread 内部流程</h3>
+    <ol>
+      <li><code>load_model()</code>：加载 rknn 模型，识别双输出张量索引（<code>box_output_idx_</code> / <code>cls_output_idx_</code>）</li>
+      <li>预分配 <code>input_mem_</code>（NPU DMA 零拷贝输入缓冲区）</li>
+      <li>每轮 <code>run()</code>：从 infer_queue 取最新帧（排空旧帧）→ RGA 硬件预处理（颜色转换+缩放，直写 DMA 缓冲，耗时 ~1ms）</li>
+      <li><code>rknn_run()</code> 推理（~30ms，已对标官方 demo 验证为硬件极限）</li>
+      <li><code>YoloPostprocess</code>：box 反量化（0~640）+ cls 反量化（0~1）→ NMS → <code>target_classes</code> 过滤</li>
+      <li>结果写入 <code>shared_dets_.set()</code>；若与 <code>last_summary_</code> 不同且超过 <code>report_interval_sec</code>，调 <code>summarize()</code> 生成 JSON 并 push 到 mqtt_queue</li>
+    </ol>
+  </div>
+
+  <div class="detail-card">
+    <h3><span class="dot" style="background:var(--c-encode);"></span>EncodeThread 内部流程</h3>
+    <ol>
+      <li><code>init_mpp()</code>：创建 MppCtx / MppApi，配置 H.264 编码参数（GOP=8，Main profile，level 3.1，bitrate）</li>
+      <li>每轮 <code>run()</code>：从 enc_queue 取一帧 YUYV</li>
+      <li><code>yuyv_to_nv12()</code>：Y 平面逐字节取，UV 平面从偶数行取样完成 2× 垂直降采样（无 RGB 中间缓冲）</li>
+      <li><code>shared_dets_.get()</code> 拷贝最新检测结果 → <code>draw_rect_nv12()</code>（内部调 <code>draw_hline_nv12</code> / <code>draw_vline_nv12</code>）直接在 NV12 平面画绿色框（BT.601 Y=145,U=54,V=34）</li>
+      <li>送入 MPP 编码器，取出 <code>EncodedPacket</code>（含 pts/dts/is_keyframe）push 到 stream_queue</li>
+    </ol>
+  </div>
+
+  <div class="detail-card">
+    <h3><span class="dot" style="background:var(--c-stream);"></span>StreamThread 内部流程</h3>
+    <ol>
+      <li><code>open_rtmp()</code>：创建 <code>AVFormatContext</code>，连接 RTMP URL</li>
+      <li>每轮 <code>run()</code>：从 stream_queue 取一个 <code>EncodedPacket</code></li>
+      <li><code>parse_annexb()</code> 拆出 NALU 列表；首个 IDR 帧时提取 SPS/PPS 调 <code>write_extradata()</code></li>
+      <li><code>write_packet()</code> 按 pts/dts 写入 FLV tag 推流</li>
+      <li>连接失败或写入异常时进入 <code>reconnect_loop()</code>，定时重试 <code>open_rtmp()</code> 直到恢复，期间不阻塞队列消费（丢弃或等待视实现而定）</li>
+    </ol>
+  </div>
+</div>
+
+<!-- ============ 队列与共享状态表 ============ -->
+<div class="section-title">队列 / 共享状态一览</div>
+<table>
+  <tr><th>名称</th><th>类型</th><th>容量</th><th>生产者 → 消费者</th><th>push 策略</th></tr>
+  <tr><td>enc_queue</td><td>BlockingQueue&lt;Frame&gt;</td><td>1（~68ms 缓冲）</td><td>Capture → Encode</td><td>阻塞 timeout=100ms，每帧必达</td></tr>
+  <tr><td>infer_queue</td><td>BlockingQueue&lt;Frame&gt;</td><td>2</td><td>Capture → Infer</td><td>非阻塞 timeout=0，忙时丢帧</td></tr>
+  <tr><td>stream_queue</td><td>BlockingQueue&lt;EncodedPacket&gt;</td><td>2（~137ms 缓冲）</td><td>Encode → Stream</td><td>默认阻塞</td></tr>
+  <tr><td>mqtt_queue</td><td>BlockingQueue&lt;std::string&gt;</td><td>16</td><td>Infer → Mqtt</td><td>默认阻塞，容量大避免反压推理</td></tr>
+  <tr><td>SharedDetections</td><td>mutex + vector</td><td>—</td><td>Infer 写 → Encode 读</td><td><code>set()</code> / <code>get()</code>，无队列阻塞语义</td></tr>
+</table>
+
+<!-- ============ 关键设计点 ============ -->
+<div class="section-title">关键设计点</div>
+<div class="points">
+  <ol>
+    <li><b>采集与推理彻底解耦</b>：CaptureThread 同时投递两条队列；enc_queue 阻塞保证编码帧不丢、不被推理速度拖累；infer_queue 非阻塞允许丢帧，InferThread 永远处理"最新"而非"排队中最旧"的帧。</li>
+    <li><b>检测框跨线程传递走共享区而非队列</b>：SharedDetections 用 get() 返回值拷贝而非引用，避免 EncodeThread 持锁时间过长，代价是编码端可能叠加"上一次"推理结果（15fps 下视觉无感）。</li>
+    <li><b>零拷贝两端</b>：采集端 V4L2 mmap 直读内核缓冲区；推理端 RGA 预处理直接写 NPU DMA 输入（<code>input_mem_</code>），均跳过 CPU 数据搬运。</li>
+    <li><b>启动/关闭顺序均为"下游先、上游后"</b>：启动时 mqtt → stream → encode → infer → capture；关闭时反向，先停 capture 再关队列让下游感知 EOF 自然退出，避免半启动 / 写已关闭流的竞态。</li>
+    <li><b>DetectionReporter 是死代码</b>：src/detect/ 目录文件仍在仓库但未被 CMakeLists.txt 引用，功能已被 InferThread 吸收（画框移到 EncodeThread，汇总上报移到 InferThread::summarize()）。</li>
+  </ol>
+</div>
+
+<p class="footer-note">生成时间：2026-06-19 · 来源：src/main.cpp 及各线程头文件（CaptureThread / InferThread / EncodeThread / StreamThread / MqttThread / SharedDetections / BlockingQueue / Frame）</p>
+
+</body>
+</html>

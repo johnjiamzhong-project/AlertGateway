@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "board": {
+      "command": "python3",
+      "args": ["${CLAUDE_PROJECT_DIR}/tools/board_mcp.py"]
+    }
+  }
+}
