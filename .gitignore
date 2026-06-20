@@ -4,6 +4,9 @@ build/
 # local Claude Code settings (machine-specific permissions, paths)
 .claude/settings.local.json
 
+# board SSH host(s), machine/network-specific — copy board_config.example.json and fill in your own
+tools/board_config.json
+
 # vendored prebuilt binaries (Rockchip/proprietary, no redistribution license bundled)
 # headers under third_party/*/include are kept, only compiled libs are ignored
 third_party/**/*.so

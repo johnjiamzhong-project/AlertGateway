@@ -1,41 +1,80 @@
 #!/usr/bin/env python3
-"""MCP server: SSH bridge to the RK3588S board at 192.168.0.200.
+"""MCP server: SSH bridge to the RK3588S board.
 
 Claude Code 通过标准输入/输出与本服务通信（JSON-RPC 2.0 over stdio）。
 本服务将工具调用转发为 SSH / SCP 命令，让 Claude Code 能直接操作板子。
 
 使用方式（.mcp.json 中已配置）：
   python3 tools/board_mcp.py
+
+板子的 SSH 地址是本机/局域网相关的配置，不进 git：复制
+tools/board_config.example.json 为 tools/board_config.json 并填入实际地址
+（按优先级排列的列表，前面的连不上会自动 failover 到下一个）。
 """
 import json
 import sys
 import subprocess
 import os
 
-# 板子 SSH 地址：RK3588S（firefly 开发板），IP 固定为 192.168.0.200
-BOARD = "firefly@192.168.0.200"
+_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "board_config.json")
+
+
+def _load_hosts() -> list:
+    if not os.path.exists(_CONFIG_PATH):
+        raise SystemExit(
+            f"missing {_CONFIG_PATH} — copy board_config.example.json to board_config.json "
+            "and fill in your board's SSH host(s)"
+        )
+    with open(_CONFIG_PATH) as f:
+        cfg = json.load(f)
+    hosts = cfg.get("hosts")
+    if not hosts:
+        raise SystemExit(f"{_CONFIG_PATH} must define a non-empty 'hosts' list")
+    return hosts
+
+
+# 按优先级排列的 SSH 地址列表（如 有线 IP, WiFi 备用 IP），逐个尝试，
+# 连接层失败（无路由/拒绝/超时）才会 failover 到下一个，不是每次都尝试全部。
+HOSTS = _load_hosts()
 
 # BatchMode=yes：禁止交互式密码提示（需提前配置 SSH 免密）
-# ConnectTimeout=10：连接超时 10s，避免板子掉线时 Claude Code 长时间卡住
-SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+# ConnectTimeout=5：连接超时 5s，保证主备切换不会等太久
+SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
+
+
+def _run(args: list, timeout: int) -> subprocess.CompletedProcess | None:
+    """运行一次 ssh/scp，连接层异常（超时/无法解析等）时返回 None 交给上层 failover。"""
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
 
 
 def ssh(cmd: str, timeout: int = 30) -> dict:
-    """在板子上执行 shell 命令，返回 stdout/stderr/returncode。"""
-    r = subprocess.run(
-        ["ssh"] + SSH_OPTS + [BOARD, cmd],
-        capture_output=True, text=True, timeout=timeout
-    )
-    return {"stdout": r.stdout, "stderr": r.stderr, "returncode": r.returncode}
+    """在板子上执行 shell 命令，按 HOSTS 顺序尝试，返回 stdout/stderr/returncode/host。"""
+    last = None
+    for host in HOSTS:
+        r = _run(["ssh"] + SSH_OPTS + [host, cmd], timeout=timeout)
+        # returncode 255 是 ssh 连接层失败（拒绝/超时/无路由），区别于远程命令本身的非 0 返回值
+        if r is not None and r.returncode != 255:
+            return {"stdout": r.stdout, "stderr": r.stderr, "returncode": r.returncode, "host": host}
+        last = r
+    if last is None:
+        return {"stdout": "", "stderr": "ssh timed out on all hosts", "returncode": 255, "host": HOSTS[-1]}
+    return {"stdout": last.stdout, "stderr": last.stderr, "returncode": last.returncode, "host": HOSTS[-1]}
 
 
 def scp_upload(local: str, remote: str, timeout: int = 60) -> dict:
-    """将本地文件上传到板子指定路径。"""
-    r = subprocess.run(
-        ["scp"] + SSH_OPTS + [local, f"{BOARD}:{remote}"],
-        capture_output=True, text=True, timeout=timeout
-    )
-    return {"stdout": r.stdout, "stderr": r.stderr, "returncode": r.returncode}
+    """将本地文件上传到板子指定路径，按 HOSTS 顺序尝试。"""
+    last = None
+    for host in HOSTS:
+        r = _run(["scp"] + SSH_OPTS + [local, f"{host}:{remote}"], timeout=timeout)
+        if r is not None and r.returncode != 255:
+            return {"stdout": r.stdout, "stderr": r.stderr, "returncode": r.returncode, "host": host}
+        last = r
+    if last is None:
+        return {"stdout": "", "stderr": "scp timed out on all hosts", "returncode": 255, "host": HOSTS[-1]}
+    return {"stdout": last.stdout, "stderr": last.stderr, "returncode": last.returncode, "host": HOSTS[-1]}
 
 
 # MCP 工具定义：Claude Code 通过 tools/list 获取此列表，按 name 调用对应工具
@@ -84,6 +123,7 @@ def call_tool(name: str, args: dict) -> str:
         timeout = args.get("timeout", 30)
         r = ssh(cmd, timeout=timeout)
         parts = []
+        if r["host"] != HOSTS[0]: parts.append(f"(via fallback host {r['host']})")
         if r["stdout"]: parts.append(f"stdout:\n{r['stdout'].rstrip()}")
         if r["stderr"]: parts.append(f"stderr:\n{r['stderr'].rstrip()}")
         parts.append(f"exit code: {r['returncode']}")
@@ -96,7 +136,8 @@ def call_tool(name: str, args: dict) -> str:
             return f"Error: local file not found: {local}"
         r = scp_upload(local, remote)
         if r["returncode"] == 0:
-            return f"Uploaded {local} → {BOARD}:{remote}"
+            suffix = f" (via fallback host {r['host']})" if r["host"] != HOSTS[0] else ""
+            return f"Uploaded {local} → {r['host']}:{remote}{suffix}"
         return f"scp failed (exit {r['returncode']}):\n{r['stderr']}"
 
     elif name == "board_log":
