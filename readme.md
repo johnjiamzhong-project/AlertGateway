@@ -263,7 +263,7 @@ cd ~/AlertGateway
 | `HDMI-Sunshine自动切换方案.md` | Firefly RK3588S 上 HDMI 输出与 Sunshine 远程游玩自动切换方案 |
 | `WebRTC远程桌面方案.md` | RK3588S WebRTC 远程桌面方案 |
 
-历史 bug 记录见根目录 `BUGS.md`。
+历史 bug 记录见根目录 `BUGS.md`；尚未落地、待评估收益的性能优化点见根目录 `TODO.md`。
 
 ---
 

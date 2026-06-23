@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>NV12 像素布局与画框原理图解</title>
+<style>
+  :root{
+    --c-encode:#d6843b;
+    --c-u:#3b6fd6;
+    --c-v:#d6483b;
+    --bg:#f5f6f8;
+    --card-bg:#ffffff;
+    --text:#1f2430;
+    --muted:#6b7280;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    padding:40px 24px 80px;
+    background:var(--bg);
+    font-family:"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;
+    color:var(--text);
+  }
+  h1{text-align:center;font-size:26px;margin:0 0 6px;}
+  .subtitle{text-align:center;color:var(--muted);font-size:13px;margin:0 0 48px;}
+  .section-title{
+    font-size:18px;font-weight:600;
+    border-left:5px solid var(--c-encode);
+    padding-left:10px;margin:64px 0 28px;
+    max-width:1180px;margin-left:auto;margin-right:auto;
+  }
+  .wrap{max-width:1180px;margin:0 auto;}
+
+  /* 概念卡片 */
+  .card-row{display:flex;gap:20px;flex-wrap:wrap;}
+  .concept-card{
+    flex:1;min-width:280px;
+    background:var(--card-bg);border-radius:10px;
+    border:1px solid #e2e5ea;box-shadow:0 2px 6px rgba(0,0,0,.05);
+    padding:18px 22px;font-size:13.5px;line-height:1.8;
+  }
+  .concept-card h3{margin:0 0 8px;font-size:14.5px;color:var(--c-encode);}
+  .concept-card code{background:#f1f2f5;border-radius:4px;padding:0 4px;font-size:12.5px;}
+
+  /* 交互演示区 */
+  .demo-area{
+    background:var(--card-bg);border-radius:12px;
+    border:1px solid #e2e5ea;box-shadow:0 2px 8px rgba(0,0,0,.06);
+    padding:28px;display:flex;flex-direction:column;gap:22px;align-items:center;
+  }
+  .demo-hint{font-size:13px;color:var(--muted);text-align:center;}
+  .grid-label{font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px;text-align:center;}
+  .pixel-grid,.uv-grid{display:grid;gap:4px;}
+  .pixel{
+    width:56px;height:56px;border-radius:7px;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    font-size:10.5px;color:#1f2430;cursor:pointer;
+    outline:2px solid transparent;transition:transform .12s,outline-color .12s;
+  }
+  .pixel:hover,.pixel.active{outline-color:var(--text);transform:scale(1.08);z-index:2;}
+  .pixel .coord{font-weight:700;}
+  .pixel .off{opacity:.75;}
+  .uvbyte{
+    width:56px;height:44px;border-radius:7px;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    font-size:10.5px;color:#1f2430;
+    outline:2px solid transparent;transition:transform .12s,outline-color .12s;
+  }
+  .uvbyte.active{outline-color:var(--text);transform:scale(1.08);z-index:2;}
+  .uvbyte .uvlabel{font-weight:700;font-size:13px;}
+  .uvbyte .off{opacity:.75;}
+
+  .info-panel{
+    width:100%;max-width:640px;
+    background:#1f2430;color:#e8eaef;
+    border-radius:10px;padding:16px 20px;
+    font-size:13px;line-height:1.9;min-height:96px;
+  }
+  .info-panel code{background:rgba(255,255,255,.12);padding:0 4px;border-radius:4px;}
+  .info-panel b{color:#ffd28a;}
+
+  /* 代码区 */
+  .code-card{
+    background:var(--card-bg);border-radius:10px;
+    border:1px solid #e2e5ea;box-shadow:0 2px 6px rgba(0,0,0,.05);
+    padding:20px 24px;
+  }
+  .code-card h3{margin:0 0 12px;font-size:14.5px;}
+  pre{
+    background:#1f2430;color:#e8eaef;border-radius:8px;
+    padding:16px 18px;font-size:12.5px;line-height:1.7;
+    overflow-x:auto;margin:0;
+  }
+  pre .c{color:#7ee787;}
+  pre .u{color:#79c0ff;}
+  pre .v{color:#ff7b72;}
+
+  .footer-note{text-align:center;color:var(--muted);font-size:11.5px;margin-top:60px;}
+</style>
+</head>
+<body>
+
+<h1>NV12 像素布局与画框原理图解</h1>
+<p class="subtitle">配合 src/encode/EncodeThread.cpp 的 yuyv_to_nv12 / draw_hline_nv12 看 · 示例用 8×4 小图演示，实际项目是 640×480，公式完全一样</p>
+
+<div class="wrap">
+  <div class="card-row">
+    <div class="concept-card">
+      <h3>为什么用 YUV 不用 RGB</h3>
+      Y = 亮度，U/V = 色度。人眼对亮度变化敏感、对颜色变化不敏感，所以可以让亮度<b>不打折</b>，颜色信息<b>打折存</b>，肉眼几乎看不出差别，但能省下大量数据量。
+    </div>
+    <div class="concept-card">
+      <h3>4:2:0 子采样</h3>
+      每个像素都有自己的 Y 值，但<b>每 2×2=4 个像素共享一组 U、V 值</b>。颜色信息被压缩到 1/4，这就是下面演示要可视化的核心规则。
+    </div>
+    <div class="concept-card">
+      <h3>NV12 = YUV420SP</h3>
+      把 Y 和 UV 分成两个连续的"平面"前后存：<code>Y平面(w×h字节)</code> + <code>UV平面(w×h/2字节，U/V交替存)</code>，总大小 <code>w*h*3/2</code>，对应 <code>EncodeThread.cpp</code> 里 <code>frame_size</code> 那行。
+    </div>
+  </div>
+</div>
+
+<div class="section-title">交互演示：像素坐标 → UV平面字节偏移量</div>
+<div class="wrap">
+  <p class="demo-hint">把鼠标移到下面任意一个像素格上 —— 同色的 2×2 像素块共享同一组 UV，移到 UV 平面里对应的两个字节（U 蓝、V 红）会一起高亮，下方面板实时算出对应的内存偏移量。</p>
+  <div class="demo-area">
+    <div>
+      <div class="grid-label">像素网格（8×4，每格是一个像素，标的是 (x,y) 和它在 Y 平面里的字节偏移）</div>
+      <div class="pixel-grid" id="pixel-grid"></div>
+    </div>
+    <div>
+      <div class="grid-label">UV 平面实际内存（8 列 × 2 行字节，每相邻两格 U/V 是一对，对应上面同色的 2×2 像素块）</div>
+      <div class="uv-grid" id="uv-grid"></div>
+    </div>
+    <div class="info-panel" id="info-panel">把鼠标移到上方任意像素格上，看它对应到 UV 平面的哪两个字节</div>
+  </div>
+</div>
+
+<div class="section-title">对应代码</div>
+<div class="wrap">
+  <div class="code-card">
+    <h3>src/encode/EncodeThread.cpp · draw_hline_nv12（节选）</h3>
+    <pre><span class="c">// y_plane[y*w+x] 就是上面像素网格里每格标的"Y偏移"</span>
+y_plane[y * w + x] = yv;
+
+<span class="c">// ux：把 x 拉回到它所在2像素块的起始列——上面UV网格里每对格子的左边那一列</span>
+int ux = x &amp; ~1;
+
+<span class="c">// (y&gt;&gt;1)：UV平面的行号，每2行像素共享1行UV——上面UV网格的"行"</span>
+<span class="u">uv_plane[(y &gt;&gt; 1) * w + ux]     = uv;</span>  <span class="c">// U，蓝色那格</span>
+<span class="v">uv_plane[(y &gt;&gt; 1) * w + ux + 1] = vv;</span>  <span class="c">// V，红色那格，紧挨着U存</span></pre>
+  </div>
+</div>
+
+<p class="footer-note">来源：本仓库 src/encode/EncodeThread.cpp（yuyv_to_nv12 / draw_hline_nv12 / draw_vline_nv12）· 用 docs/架构图.html 同一套配色风格</p>
+
+<script>
+const W = 8, H = 4;
+
+function blockColor(blockIndex, variant){
+  const hue = (blockIndex * 47) % 360;
+  if (variant === 'pixel') return `hsl(${hue},55%,90%)`;
+  if (variant === 'u')     return `hsl(${hue},65%,72%)`;
+  return `hsl(${hue},65%,58%)`; // v
+}
+
+function buildGrids(){
+  const pixGrid = document.getElementById('pixel-grid');
+  pixGrid.style.gridTemplateColumns = `repeat(${W}, 56px)`;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const uvRow = y >> 1, blockCol = x >> 1;
+      const blockIndex = uvRow * (W / 2) + blockCol;
+      const yOffset = y * W + x;
+      const div = document.createElement('div');
+      div.className = 'pixel';
+      div.style.background = blockColor(blockIndex, 'pixel');
+      div.dataset.x = x; div.dataset.y = y;
+      div.innerHTML = `<div class="coord">(${x},${y})</div><div class="off">Y@${yOffset}</div>`;
+      div.addEventListener('mouseenter', () => highlight(x, y));
+      div.addEventListener('mouseleave', clearHighlight);
+      pixGrid.appendChild(div);
+    }
+  }
+
+  const uvGrid = document.getElementById('uv-grid');
+  uvGrid.style.gridTemplateColumns = `repeat(${W}, 56px)`;
+  for (let r = 0; r < H / 2; r++) {
+    for (let c = 0; c < W; c++) {
+      const blockCol = c >> 1;
+      const blockIndex = r * (W / 2) + blockCol;
+      const isU = (c % 2 === 0);
+      const offset = W * H + r * W + c;
+      const div = document.createElement('div');
+      div.className = 'uvbyte';
+      div.style.background = blockColor(blockIndex, isU ? 'u' : 'v');
+      div.dataset.row = r; div.dataset.col = c;
+      div.innerHTML = `<div class="uvlabel">${isU ? 'U' : 'V'}</div><div class="off">@${offset}</div>`;
+      uvGrid.appendChild(div);
+    }
+  }
+}
+
+function highlight(x, y){
+  document.querySelectorAll('.pixel').forEach(p =>
+    p.classList.toggle('active', +p.dataset.x === x && +p.dataset.y === y));
+
+  const uvRow = y >> 1, ux = x & ~1;
+  document.querySelectorAll('.uvbyte').forEach(c => {
+    const r = +c.dataset.row, col = +c.dataset.col;
+    c.classList.toggle('active', r === uvRow && (col === ux || col === ux + 1));
+  });
+
+  const yOff = y * W + x;
+  const uOff = W * H + uvRow * W + ux;
+  document.getElementById('info-panel').innerHTML = `
+    <code>x=${x}, y=${y}</code><br>
+    Y偏移 = y*w+x = ${y}*${W}+${x} = <b>${yOff}</b><br>
+    uv行 = y&gt;&gt;1 = <b>${uvRow}</b>　ux = x&amp;~1 = <b>${ux}</b><br>
+    U偏移 = w*h + uv行*w + ux = ${W * H}+${uvRow}*${W}+${ux} = <b>${uOff}</b><br>
+    V偏移 = U偏移+1 = <b>${uOff + 1}</b>
+  `;
+}
+
+function clearHighlight(){
+  document.querySelectorAll('.pixel,.uvbyte').forEach(e => e.classList.remove('active'));
+  document.getElementById('info-panel').innerHTML = '把鼠标移到上方任意像素格上，看它对应到 UV 平面的哪两个字节';
+}
+
+window.addEventListener('DOMContentLoaded', buildGrids);
+</script>
+
+</body>
+</html>

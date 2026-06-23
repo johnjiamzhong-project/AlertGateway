@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>H.264 封装格式转换图解：Annex B → AVCC</title>
+<style>
+  :root{
+    --c-encode:#d6843b;
+    --c-sps:#3b6fd6;
+    --c-pps:#8b5cc7;
+    --c-idr:#3bb273;
+    --c-p:#94a3b8;
+    --bg:#f5f6f8;
+    --card-bg:#ffffff;
+    --text:#1f2430;
+    --muted:#6b7280;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    padding:40px 24px 80px;
+    background:var(--bg);
+    font-family:"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;
+    color:var(--text);
+  }
+  h1{text-align:center;font-size:26px;margin:0 0 6px;}
+  .subtitle{text-align:center;color:var(--muted);font-size:13px;margin:0 0 48px;}
+  .section-title{
+    font-size:18px;font-weight:600;
+    border-left:5px solid var(--c-encode);
+    padding-left:10px;margin:64px 0 28px;
+    max-width:1180px;margin-left:auto;margin-right:auto;
+  }
+  .wrap{max-width:1180px;margin:0 auto;}
+
+  /* 概念卡片 */
+  .card-row{display:flex;gap:20px;flex-wrap:wrap;}
+  .concept-card{
+    flex:1;min-width:280px;
+    background:var(--card-bg);border-radius:10px;
+    border:1px solid #e2e5ea;box-shadow:0 2px 6px rgba(0,0,0,.05);
+    padding:18px 22px;font-size:13.5px;line-height:1.8;
+  }
+  .concept-card h3{margin:0 0 8px;font-size:14.5px;color:var(--c-encode);}
+  .concept-card code{background:#f1f2f5;border-radius:4px;padding:0 4px;font-size:12.5px;}
+
+  /* 图例 */
+  .legend{display:flex;gap:18px;flex-wrap:wrap;justify-content:center;margin-bottom:20px;font-size:12.5px;color:var(--text);}
+  .legend span{display:inline-flex;align-items:center;gap:6px;}
+  .swatch{width:14px;height:14px;border-radius:4px;display:inline-block;}
+
+  /* 演示区 */
+  .demo-area{
+    background:var(--card-bg);border-radius:12px;
+    border:1px solid #e2e5ea;box-shadow:0 2px 8px rgba(0,0,0,.06);
+    padding:28px;display:flex;flex-direction:column;gap:26px;
+  }
+  .panel-label{font-size:13px;font-weight:600;margin-bottom:10px;}
+  .panel-sub{font-size:11.5px;color:var(--muted);margin-top:-6px;margin-bottom:10px;}
+
+  /* 左侧 Annex B 时间轴 */
+  .annexb-track{display:flex;align-items:center;flex-wrap:wrap;gap:0;}
+  .startcode{
+    font-size:10px;color:var(--muted);text-align:center;padding:0 6px;
+    white-space:nowrap;line-height:1.3;
+  }
+  .nalu-block{
+    border-radius:8px;padding:10px 12px;min-width:78px;text-align:center;
+    cursor:pointer;outline:2px solid transparent;transition:transform .12s,outline-color .12s;
+    font-size:11px;
+  }
+  .nalu-block .name{font-weight:700;font-size:12.5px;}
+  .nalu-block .hex{opacity:.8;margin-top:2px;}
+  .nalu-block .sz{opacity:.8;}
+  .nalu-block:hover,.nalu-block.active{outline-color:var(--text);transform:scale(1.06);z-index:2;}
+
+  /* 右上：extradata 字节结构 */
+  .byte-row{display:flex;flex-wrap:wrap;gap:4px;}
+  .bytecell{
+    border-radius:6px;padding:6px 8px;min-width:46px;text-align:center;
+    font-size:10.5px;background:#eef1f5;color:var(--text);
+    outline:2px solid transparent;transition:transform .12s,outline-color .12s;
+  }
+  .bytecell .lbl{font-weight:700;}
+  .bytecell.active{outline-color:var(--text);transform:scale(1.08);z-index:2;}
+
+  /* 右下：AVCC 帧序列 */
+  .avcc-track{display:flex;flex-wrap:wrap;gap:8px;}
+  .avcc-entry{display:flex;align-items:center;border-radius:8px;overflow:hidden;
+    outline:2px solid transparent;transition:transform .12s,outline-color .12s;cursor:pointer;}
+  .avcc-entry.active{outline-color:var(--text);transform:scale(1.06);z-index:2;}
+  .len-box{padding:10px 8px;font-size:10px;text-align:center;background:#1f2430;color:#ffd28a;}
+  .data-box{padding:10px 12px;font-size:11px;text-align:center;}
+
+  .info-panel{
+    background:#1f2430;color:#e8eaef;border-radius:10px;padding:16px 20px;
+    font-size:13px;line-height:1.9;min-height:72px;
+  }
+  .info-panel code{background:rgba(255,255,255,.12);padding:0 4px;border-radius:4px;}
+  .info-panel b{color:#ffd28a;}
+
+  /* 代码区 */
+  .code-card{
+    background:var(--card-bg);border-radius:10px;
+    border:1px solid #e2e5ea;box-shadow:0 2px 6px rgba(0,0,0,.05);
+    padding:20px 24px;margin-top:18px;
+  }
+  .code-card h3{margin:0 0 12px;font-size:14.5px;}
+  pre{
+    background:#1f2430;color:#e8eaef;border-radius:8px;
+    padding:16px 18px;font-size:12.5px;line-height:1.7;
+    overflow-x:auto;margin:0;
+  }
+  pre .c{color:#7ee787;}
+  pre .k{color:#79c0ff;}
+
+  .footer-note{text-align:center;color:var(--muted);font-size:11.5px;margin-top:60px;}
+</style>
+</head>
+<body>
+
+<h1>H.264 封装格式转换图解：Annex B → AVCC</h1>
+<p class="subtitle">配合 src/stream/StreamThread.cpp 的 parse_annexb / write_extradata / write_packet 看</p>
+
+<div class="wrap">
+  <div class="card-row">
+    <div class="concept-card">
+      <h3>NALU 是什么</h3>
+      H.264码流不是连续的画面数据，而是一串"网络抽象层单元"(NALU)拼起来的，每个NALU有个<code>type</code>标签，标识自己是画面帧还是配置信息。
+    </div>
+    <div class="concept-card">
+      <h3>SPS/PPS 管什么</h3>
+      SPS(type=7)管序列级参数(分辨率/profile)，PPS(type=8)管图像级参数(熵编码方式等)。画面数据是压缩后的残差，没有这两份配置解码器完全无法解析。
+    </div>
+    <div class="concept-card">
+      <h3>为什么要转换格式</h3>
+      EncodeThread/MPP吐出来的是<b>Annex B</b>(起始码分隔,无长度字段)，但FLV容器要求<b>AVCC</b>(4字节长度前缀,SPS/PPS单独存进extradata只发一次)。
+    </div>
+  </div>
+</div>
+
+<div class="section-title">交互演示：一段码流从 Annex B 转成 AVCC</div>
+<div class="wrap">
+  <div class="legend">
+    <span><span class="swatch" style="background:var(--c-sps);"></span>SPS (type 7)</span>
+    <span><span class="swatch" style="background:var(--c-pps);"></span>PPS (type 8)</span>
+    <span><span class="swatch" style="background:var(--c-idr);"></span>IDR关键帧 (type 5)</span>
+    <span><span class="swatch" style="background:var(--c-p);"></span>普通帧 (type 1)</span>
+  </div>
+  <div class="demo-area">
+
+    <div>
+      <div class="panel-label">① Annex B 原始码流（EncodeThread/MPP 吐出来的格式，起始码分隔）</div>
+      <div class="panel-sub">把鼠标移到任意 NALU 方块上，看它在右边转换成了什么</div>
+      <div class="annexb-track" id="annexb-track"></div>
+    </div>
+
+    <div>
+      <div class="panel-label">② extradata：AVCDecoderConfigurationRecord（只在写 header 时打包一次）</div>
+      <div class="panel-sub">SPS/PPS 被从码流里抽走，塞进这个结构，不会再出现在每帧数据里</div>
+      <div class="byte-row" id="extradata-row"></div>
+    </div>
+
+    <div>
+      <div class="panel-label">③ AVCC 帧序列（每帧实际写进 RTMP 包体的内容，不含 SPS/PPS）</div>
+      <div class="panel-sub">每个画面NALU前面换成4字节长度前缀，不再需要扫描起始码找边界</div>
+      <div class="avcc-track" id="avcc-track"></div>
+    </div>
+
+    <div class="info-panel" id="info-panel">把鼠标移到①里任意一个NALU方块上，看它转换成了②还是③里的哪一段</div>
+  </div>
+</div>
+
+<div class="section-title">对应代码</div>
+<div class="wrap">
+  <div class="code-card">
+    <h3>src/stream/StreamThread.cpp · 关键片段</h3>
+    <pre><span class="c">// parse_annexb()：扫描起始码切出每个NALU，type取自第一个字节低5位</span>
+nalus.push_back({buf + start, end - start, <span class="k">static_cast&lt;uint8_t&gt;</span>(buf[start] &amp; 0x1F)});
+
+<span class="c">// write_packet()：第一次遇到关键帧时，把SPS(7)/PPS(8)挑出来缓存</span>
+<span class="k">if</span> (n.type == 7) sps_.assign(n.data, n.data + n.size);
+<span class="k">if</span> (n.type == 8) pps_.assign(n.data, n.data + n.size);
+
+<span class="c">// write_extradata()：缓存的SPS/PPS打包成②里那个结构，塞进extradata</span>
+extra[p++] = 0x01;                                            <span class="c">// configurationVersion</span>
+extra[p++] = sps[1]; extra[p++] = sps[2]; extra[p++] = sps[3]; <span class="c">// profile/compat/level</span>
+extra[p++] = 0xFF;  <span class="c">// lengthSizeMinusOne=3，告诉解码器长度前缀是4字节</span>
+extra[p++] = 0xE1;  <span class="c">// numOfSPS=1</span>
+
+<span class="c">// write_packet()：剩下的画面NALU(跳过7/8)重新拼成③那样的AVCC格式</span>
+avcc.push_back((sz &gt;&gt; 24) &amp; 0xFF); <span class="c">// 4字节大端长度前缀，sz=这个NALU的字节数</span>
+avcc.insert(avcc.end(), n.data, n.data + n.size);</pre>
+  </div>
+</div>
+
+<p class="footer-note">来源：本仓库 src/stream/StreamThread.cpp（parse_annexb / write_extradata / write_packet）· 用 docs/架构图.html 同一套配色风格</p>
+
+<script>
+// 示例码流：SPS/PPS只在开头出现一次，后面跟一个关键帧+两个普通帧
+const NALUS = [
+  { id:'sps', type:7, name:'SPS',  hex:'0x67', size:15,  color:'var(--c-sps)', kind:'config' },
+  { id:'pps', type:8, name:'PPS',  hex:'0x68', size:4,   color:'var(--c-pps)', kind:'config' },
+  { id:'idr', type:5, name:'IDR',  hex:'0x65', size:120, color:'var(--c-idr)', kind:'frame'  },
+  { id:'p1',  type:1, name:'P帧',  hex:'0x41', size:45,  color:'var(--c-p)',   kind:'frame'  },
+  { id:'p2',  type:1, name:'P帧',  hex:'0x41', size:38,  color:'var(--c-p)',   kind:'frame'  },
+];
+
+function buildAnnexB(){
+  const track = document.getElementById('annexb-track');
+  NALUS.forEach((n, idx) => {
+    const sc = document.createElement('div');
+    sc.className = 'startcode';
+    sc.textContent = idx === 0 ? '00 00 00 01 →' : '00 00 01 →';
+    track.appendChild(sc);
+
+    const block = document.createElement('div');
+    block.className = 'nalu-block';
+    block.style.background = n.color;
+    block.dataset.id = n.id;
+    block.innerHTML = `<div class="name">${n.name}</div><div class="hex">${n.hex} (type=${n.type})</div><div class="sz">${n.size} bytes</div>`;
+    block.addEventListener('mouseenter', () => highlight(n.id));
+    block.addEventListener('mouseleave', clearHighlight);
+    track.appendChild(block);
+  });
+}
+
+function buildExtradata(){
+  const row = document.getElementById('extradata-row');
+  const sps = NALUS.find(n => n.id === 'sps');
+  const pps = NALUS.find(n => n.id === 'pps');
+  const cells = [
+    { id:'hdr', lbl:'0x01', sub:'version' },
+    { id:'sps', lbl:'profile', sub:'抄SPS[1]' },
+    { id:'sps', lbl:'compat',  sub:'抄SPS[2]' },
+    { id:'sps', lbl:'level',   sub:'抄SPS[3]' },
+    { id:'hdr', lbl:'0xFF',   sub:'len=4字节' },
+    { id:'hdr', lbl:'0xE1',   sub:'numSPS=1' },
+    { id:'sps', lbl:`${sps.size}`, sub:'SPS长度(2B)' },
+    { id:'sps', lbl:'SPS数据',  sub:`${sps.size}字节` },
+    { id:'hdr', lbl:'0x01',   sub:'numPPS=1' },
+    { id:'pps', lbl:`${pps.size}`, sub:'PPS长度(2B)' },
+    { id:'pps', lbl:'PPS数据',  sub:`${pps.size}字节` },
+  ];
+  cells.forEach(c => {
+    const div = document.createElement('div');
+    div.className = 'bytecell';
+    div.dataset.id = c.id;
+    div.innerHTML = `<div class="lbl">${c.lbl}</div><div>${c.sub}</div>`;
+    row.appendChild(div);
+  });
+}
+
+function buildAvcc(){
+  const track = document.getElementById('avcc-track');
+  NALUS.filter(n => n.kind === 'frame').forEach(n => {
+    const hex = n.size.toString(16).padStart(8, '0').match(/../g).join(' ');
+    const entry = document.createElement('div');
+    entry.className = 'avcc-entry';
+    entry.dataset.id = n.id;
+    entry.innerHTML = `<div class="len-box">${hex}<br>(len=${n.size})</div>
+                        <div class="data-box" style="background:${n.color}">${n.name} 数据 ${n.size}B</div>`;
+    track.appendChild(entry);
+  });
+}
+
+function highlight(id){
+  document.querySelectorAll('.nalu-block').forEach(b => b.classList.toggle('active', b.dataset.id === id));
+  document.querySelectorAll('.bytecell').forEach(c => c.classList.toggle('active', c.dataset.id === id));
+  document.querySelectorAll('.avcc-entry').forEach(e => e.classList.toggle('active', e.dataset.id === id));
+
+  const n = NALUS.find(x => x.id === id);
+  const panel = document.getElementById('info-panel');
+  if (n.kind === 'config') {
+    panel.innerHTML = `<code>${n.name} (type=${n.type}, ${n.size}字节)</code><br>
+      这段NALU<b>不会出现在帧序列里</b>——它被抽出来，打包进②的 <b>AVCDecoderConfigurationRecord</b> 结构，塞进 extradata，整次推流只写一次。`;
+  } else {
+    const hex = n.size.toString(16).padStart(8, '0').match(/../g).join(' ');
+    panel.innerHTML = `<code>${n.name} (type=${n.type}, ${n.size}字节)</code><br>
+      Annex B里靠扫描下一个起始码才知道这个NALU到哪结束；AVCC格式给它加一个<b>4字节长度前缀 = ${hex}</b>(即十进制${n.size})，
+      解码器直接读这4个字节就知道数据有多长，不用再扫描起始码。`;
+  }
+}
+
+function clearHighlight(){
+  document.querySelectorAll('.nalu-block,.bytecell,.avcc-entry').forEach(e => e.classList.remove('active'));
+  document.getElementById('info-panel').innerHTML = '把鼠标移到①里任意一个NALU方块上，看它转换成了②还是③里的哪一段';
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  buildAnnexB();
+  buildExtradata();
+  buildAvcc();
+});
+</script>
+
+</body>
+</html>
