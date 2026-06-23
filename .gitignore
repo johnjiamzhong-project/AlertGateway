@@ -19,3 +19,7 @@ model/*.onnx
 # editor/OS noise
 .vscode/
 .DS_Store
+
+# personal study notes, not for upload (interview_qa.md is the exception — tracked)
+notes/*
+!notes/interview_qa.md
