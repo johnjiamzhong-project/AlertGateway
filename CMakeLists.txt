@@ -4,6 +4,10 @@ project(AlertGateway CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# 生成 compile_commands.json，供 VSCode C/C++ 插件读取真实的 include 路径/宏定义，
+# 避免 IntelliSense 因为不知道 src/ 在 include 路径里而把跨文件类型误判为不完整类型。
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # ── Third-party headers ───────────────────────────────────────────────────────
 set(TP ${CMAKE_SOURCE_DIR}/third_party)
 include_directories(
