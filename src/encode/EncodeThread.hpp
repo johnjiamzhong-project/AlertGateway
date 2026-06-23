@@ -14,9 +14,12 @@ struct EncodeConfig {
     int width;
     int height;
     int fps;
-    int bitrate_kbps = 2000;
+    int bitrate_kbps = 2000;  // CBR目标码率；RTMP直播推流要稳定带宽，不用VBR换画质
 };
 
+// 编码线程：取帧 → YUYV直转NV12 → 叠最新检测框 → MPP硬编码H.264 → 写EncodedPacket队列。
+// 跟 InferThread 分开是为了让编码帧率不被NPU推理速度(~40ms/帧)拖累，
+// 检测框通过 shared_dets_ 这个"覆盖式共享区"读最新结果，不走队列、不等待推理完成。
 class EncodeThread {
 public:
     EncodeThread(const EncodeConfig& cfg,
@@ -25,16 +28,17 @@ public:
                  SharedDetections& shared_dets);
     ~EncodeThread();
 
-    void start();
-    void stop();
+    void start();  // 初始化MPP编码器并启动编码线程
+    void stop();   // 停线程并释放MPP资源
 
 private:
-    void run();
-    bool init_mpp();
-    void deinit_mpp();
-    // Direct YUYV→NV12, no intermediate RGB buffer
+    void run();          // 编码主循环（取帧→转格式→画框→硬编码→取包），详见 .cpp
+    bool init_mpp();     // 创建MPP编码上下文、配置参数、申请DRM buffer group，详见 .cpp
+    void deinit_mpp();   // 按创建的反顺序释放 buf_group_/ctx_
+
+    // YUYV422 → NV12(YUV420SP) 直转，不经过RGB中间格式；MPP硬编码器只吃NV12，详见 .cpp
     static void yuyv_to_nv12(const uint8_t* yuyv, uint8_t* nv12, int w, int h);
-    // Box drawing directly on NV12 planes
+    // 在NV12的Y/UV平面上直接画线/画框，没有用任何图形库，详见 .cpp
     static void draw_hline_nv12(uint8_t* nv12, int w, int h, int x0, int x1, int y,
                                  uint8_t yv, uint8_t uv, uint8_t vv);
     static void draw_vline_nv12(uint8_t* nv12, int w, int h, int x, int y0, int y1,
@@ -46,12 +50,12 @@ private:
     EncodeConfig                  cfg_;
     BlockingQueue<Frame>&         in_queue_;
     BlockingQueue<EncodedPacket>& out_queue_;
-    SharedDetections&             shared_dets_;
+    SharedDetections&             shared_dets_;  // 读最新检测框用，写端是 InferThread
     std::thread                   thread_;
     std::atomic<bool>             running_{false};
 
-    MppCtx         ctx_       = nullptr;
-    MppApi*        mpi_       = nullptr;
-    MppBufferGroup buf_group_ = nullptr;
-    int64_t        frame_idx_ = 0;
+    MppCtx         ctx_       = nullptr;  // MPP 编码上下文
+    MppApi*        mpi_       = nullptr;  // MPP 函数接口表，编解码操作都通过它调用
+    MppBufferGroup buf_group_ = nullptr;  // DRM类型buffer池，硬件编码器能直接DMA访问
+    int64_t        frame_idx_ = 0;        // 累计编码帧数，用于按 cfg_.fps 推算每帧的PTS
 };

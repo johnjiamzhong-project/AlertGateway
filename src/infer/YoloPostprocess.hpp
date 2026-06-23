@@ -26,24 +26,20 @@ struct YoloConfig {
     std::vector<std::string> target_classes;
 };
 
+// YOLOv8 后处理：把NPU输出的原始 box/cls 张量解码成检测框，按置信度过滤、NMS去重，
+// 坐标映射回原始帧尺寸。详细的张量布局和算法细节见 .cpp 各函数上方注释。
 class YoloPostprocess {
 public:
     explicit YoloPostprocess(const YoloConfig& cfg);
 
-    // Box and class are separate RKNN outputs (split before the final concat at
-    // export time so each gets its own quantization scale -- a single shared scale
-    // across box pixel coords (0-640) and class probabilities (0-1) destroys the
-    // class precision). Both are row-major float32 [channels][n_anchors]:
-    //   box[0..3][a]  : cx, cy, w, h in model_input_size pixel space
-    //   cls[0..79][a] : class probabilities (already past Sigmoid in the ONNX graph)
-    // Returns detections in original frame coordinate space.
+    // 解码+过滤+NMS，返回原始帧坐标系下的检测框列表，详见 .cpp
     std::vector<Detection> process(const float* box, const float* cls, int n_anchors,
                                    int orig_w, int orig_h) const;
 
 private:
-    float iou(const Detection& a, const Detection& b) const;
-    std::vector<Detection> nms(std::vector<Detection> dets) const;
+    float iou(const Detection& a, const Detection& b) const;          // 计算两个框的IoU，详见 .cpp
+    std::vector<Detection> nms(std::vector<Detection> dets) const;    // 非极大值抑制去重叠框，详见 .cpp
 
     YoloConfig cfg_;
-    std::unordered_set<std::string> target_set_;
+    std::unordered_set<std::string> target_set_;  // target_classes 转成set，方便process()里O(1)查找
 };
