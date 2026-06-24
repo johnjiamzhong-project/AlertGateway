@@ -41,6 +41,7 @@ void CaptureThread::run() {
         FD_SET(fd_, &fds);
         struct timeval tv{ .tv_sec = 2, .tv_usec = 0 };
 
+        //只检查 `fd_` 是否进入可读状态
         int r = select(fd_ + 1, &fds, nullptr, nullptr, &tv);
         if (r == -1) { if (errno == EINTR) continue; break; }
         if (r == 0)  continue; // 超时，没有新帧

@@ -14,18 +14,17 @@
 ┌─────────────────────────────────────────────────────┐
 │                   AlertGateway                       │
 │                                                      │
-│  采集线程      推理线程      检测处理线程              │
-│  V4L2      →  RKNN NPU  →  DetectionReporter        │
-│  /dev/video   YOLOv8s      画检测框 + 结果汇总         │
-│                    │              │                  │
-│                    ▼              ▼                  │
-│               编码线程        MQTT线程               │
-│               MPP硬编        检测结果上报             │
-│               h264_rkmpp     Paho MQTT              │
-│                    │                                 │
-│                    ▼                                 │
-│               推流线程                               │
-│               RTMP推流                               │
+│  采集线程                                            │
+│  V4L2 ──┬──────────────→  编码线程  →  推流线程       │
+│  /dev/video             MPP硬编      RTMP推流        │
+│         │                 h264_rkmpp                │
+│         │                    ▲                      │
+│         │            叠加最新检测框(SharedDetections) │
+│         └──→  推理线程  ───────┘                     │
+│              RKNN NPU                                │
+│              YOLOv8s  ──→  MQTT线程                  │
+│                            检测结果上报               │
+│                            Paho MQTT                 │
 └────────────────────┬────────────────────────────────┘
                      │
         ┌────────────┴────────────┐
@@ -61,13 +60,13 @@
 | laptop | 63 | 笔记本电脑 |
 | book | 73 | 书本 |
 
-### 检测结果处理（DetectionReporter）
+### 检测结果处理
 
 替代原有的离岗/睡岗告警状态机，逻辑更简单：
 
-1. 推理线程对每帧画面做目标检测，按 `target_classes` 过滤出关心的物品
-2. 检测处理线程将检测框 + 类别 + 置信度叠加到画面上，供编码推流
-3. 按固定周期（如 1 秒，`report_interval_sec` 可配置）汇总当前帧检测到的物品种类与数量
+1. 推理线程（`InferThread`）对每帧画面做目标检测，按 `target_classes` 过滤出关心的物品，结果写入共享结构 `SharedDetections`
+2. 编码线程（`EncodeThread`）每帧编码前从 `SharedDetections` 读取最新检测结果，将检测框 + 类别 + 置信度叠加到画面上，再交给硬编码器
+3. 推理线程按固定周期（如 1 秒，`report_interval_sec` 可配置）汇总当前帧检测到的物品种类与数量
 4. 与上一次汇总结果对比，发生变化（新增/消失/数量变化）时通过 MQTT 上报一条 JSON 消息
 
 上报消息示例：
@@ -140,8 +139,6 @@ AlertGateway/
 │   ├── infer/
 │   │   ├── InferThread.cpp      # RKNN 推理线程
 │   │   └── YoloPostprocess.cpp  # 后处理 + 类别过滤
-│   ├── detect/
-│   │   └── DetectionReporter.cpp # 检测结果画框 + 汇总上报
 │   ├── encode/
 │   │   └── EncodeThread.cpp     # MPP 硬编线程
 │   ├── stream/
@@ -274,7 +271,7 @@ cd ~/AlertGateway
 - [x] V4L2 采集线程（`CaptureThread`，mmap 零拷贝，双队列分发）
 - [x] RKNN 推理线程（`InferThread`，RGA 预处理 + 双输出张量分别量化）
 - [x] YOLOv8 后处理（`YoloPostprocess`，NMS + 目标类别过滤）
-- [x] 检测结果处理（画框逻辑已并入 `EncodeThread`，汇总上报已并入 `InferThread`；原独立的 `DetectionReporter` 已废弃，详见 `src/detect/` 说明）
+- [x] 检测结果处理（画框逻辑已并入 `EncodeThread`，汇总上报已并入 `InferThread`；原独立的 `DetectionReporter` 已废弃并删除）
 - [x] MPP 编码线程（`EncodeThread`，YUYV→NV12 直转 + NV12 平面画框）
 - [x] RTMP 推流线程（`StreamThread`，支持断线自动重连）
 - [x] MQTT 上报线程（`MqttThread`）

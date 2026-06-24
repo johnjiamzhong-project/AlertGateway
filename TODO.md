@@ -15,6 +15,13 @@
 
 - [ ] **CPU/NPU governor 固定为 `performance`（持久化配置）**：实测发现 governor 设为 `performance` 时单帧 NPU 推理（`rknn_run`）可压到 ~31ms，真实运行时（governor 按需调频）在 32-51ms 间波动。目前只是 sysfs 临时生效，重启会还原，是否做成持久化配置（开机脚本/systemd）待定。用更高功耗换取更低且更稳定的延迟抖动，需要权衡功耗预算。详见 `docs/NPU官方demo测速对比记录.md`。
 
+## 模型量化实验（项目延伸，优先级待定）
+
+- [ ] **校准算法对比**：`rknn-toolkit2` 转换脚本（`tools/convert_int8.py`）里把量化校准算法依次换成 `normal`/`mmse`/`kl_divergence`，其余配置不变，各跑一次转换；对比项：检测精度（同一批测试图片的mAP或人工抽查漏检/误检数量）+ 板子实测 `rknn_run` 耗时。预计1天内可完成，产出一张对比表。
+- [ ] **混合精度量化**：box回归分支保留更高精度（FP16或更高量化档位），其余维持INT8（`rknn-toolkit2` 支持按层/算子名指定量化精度）；对比"全INT8" vs "box分支高精度+其余INT8"两版的精度/耗时差异。直接延伸自 `BUGS.md` BUG-009（box/cls共享scale导致精度丢失）的真实排查经历，用数据支撑"为什么box层对量化敏感"这个论点。
+
+QAT（量化感知训练）和剪枝暂不列入：QAT需要完整重训练YOLOv8s，本地GPU（GTX 1650S）跑不动且性价比低；剪枝（torch-pruning结构化剪枝+真实NPU收益测试）是新开的独立方向，待上面两项做完且时间允许再评估。
+
 ## 其他工具（非 AlertGateway 主流程）
 
 - [ ] **WebRTC 远程桌面方案延迟 1-2 秒**：板子上 GStreamer+WebRTC 远程桌面工具（跟 AlertGateway 检测/推流业务无关，是独立的开发便利性工具），原因是 webrtcbin jitter buffer + gop=30，待优化。详见 `docs/WebRTC远程桌面方案.md`。

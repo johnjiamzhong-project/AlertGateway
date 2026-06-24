@@ -20,6 +20,4 @@ model/*.onnx
 .vscode/
 .DS_Store
 
-# personal study notes, not for upload (interview_qa.md is the exception — tracked)
-notes/*
-!notes/interview_qa.md
+# personal study notes — tracked (interview_qa.md was split into per-topic files under notes/)

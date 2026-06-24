@@ -1,0 +1,53 @@
+notes/ 面试问答笔记 阅读顺序说明
+
+每个文件是一个独立话题,内部格式统一为:核心一句话 / 要点N或追问N / 注意事项 / 代码位置参考。
+建议按下面顺序读,先搭整体框架,再顺着数据流逐个深入,最后看跨话题对比。
+
+1. main_orchestration.md
+   先看整体架构——main.cpp 把哪些线程、哪些队列拼起来,数据从哪到哪。
+   后面每个话题都是这张图里的一块,先有全局图再看细节不容易迷路。
+
+2. blocking_queue.md
+   贯穿全局的基础设施。各线程之间全靠这个队列通信,先搞清楚它怎么避免死锁、
+   怎么靠 closed_ 标志安全关闭,后面看每条线程怎么用它会更顺。
+
+3. v4l2_capture.md
+   数据从这里产生。V4L2基础概念、四个核心ioctl、mmap、select的作用、
+   为什么用YUYV、为什么不用OpenCV取流。
+
+4. capture_thread_run.md
+   在上一篇基础上看完整的 run() 数据流:等帧→取帧→封装→分发→还帧五步,
+   重点是分发给两个下游队列时"深拷贝"和"move"的区别。
+
+5. infer_thread.md
+   推理线程设计重点:背压丢帧策略、zero-copy内存管理、双输出量化scale的bug、
+   NPU硬件优化的实测验证、RGA硬件加速+CPU兜底。
+
+6. yolo_postprocess.md
+   推理线程内部用到的后处理细节:NPU原始输出怎么解码成检测框、NMS怎么做、
+   预处理用整图拉伸而非letterbox这个待核实点。紧跟 infer_thread 看。
+
+7. infer_encode_split.md
+   承上启下的关键设计动机:为什么推理和编码必须分开线程,SharedDetections
+   这种"覆盖式共享区"怎么解耦两条线的节奏。读完这篇再看下一篇会更通顺。
+
+8. encode_thread.md
+   编码线程设计重点:手写NV12转换+画框、MPP引用计数式buffer管理、
+   CBR+GOP码率选型权衡、put/get异步流水线关系。
+
+9. mpp_encode.md
+   跟上一篇内容有重叠,但换了个组织方式——按"概念→buffer→参数→流程→格式"
+   这条面试官常问的顺序梳理MPP编码,适合临场对照着用。
+
+10. stream_thread.md
+    推流线程设计重点:为什么用H.264不用H.265、Annex B↔AVCC封装格式转换、
+    SPS/PPS缓存支撑快速重连、双重断线检测机制。
+
+11. mqtt_reconnect.md
+    紧跟上一篇看的对比话题:StreamThread和MqttThread面对"连不上/断开"
+    走的是两种不同设计,搞清楚 automatic_reconnect 到底覆盖哪些场景、
+    不覆盖哪些场景。
+
+待整理(已记入项目记忆,尚未成文):
+- SRS gop_cache 排查弯路(配置文件搞错+HLS隐藏耦合,对应 BUGS.md BUG-006/BUG-008)
+- INT8量化迁移全流程(校准数据采集、onnx版本坑、FP16比INT8慢一倍原理,对应 BUGS.md BUG-007)
