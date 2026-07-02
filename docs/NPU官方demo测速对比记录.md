@@ -67,7 +67,61 @@ for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performa
 3. 锁满 CPU 频率后差距从 2倍+ 收窄到 67ms vs 40ms，剩余差距大概率是真实 pipeline 持续高负载下的系统状态（缓存命中、调度连续性等）与孤立单进程测试的固有差异，不需要进一步排查。
 4. 顺带发现的优化点：如果 AlertGateway 正式运行时希望延迟更稳定，可以考虑把板子 CPU/NPU governor 固定为 `performance`（持久化配置），用更高功耗换取更低且更稳定的延迟抖动。本次改动只是临时生效（sysfs 直接写，重启会还原），是否要做成持久配置待定。
 
+## 🔍 补充：持久化调优服务的对比测试与验证指南
+
+为了验证性能锁定服务的实际效果，我们设计了使用板端官方 Demo 结合项目 INT8 模型进行**纯净时延测试**的操作流程。
+
+### 1. 测试前准备
+确保开发板上有我们已经编译好的官方测速 Demo，并位于以下路径：
+`~/rknn_yolov8_demo_test`
+
+---
+
+### 2. 测试方案与运行命令
+
+#### 方案 A：默认节能模式测试 (CPU interactive, NPU ondemand)
+在开发板上运行以下命令，暂停我们的锁定服务，并在默认状态下测试推理耗时：
+```bash
+# 1. 停用性能锁定服务
+sudo systemctl stop rockchip-performance
+
+# 2. 运行 demo 测试耗时
+cd ~/rknn_yolov8_demo_test
+LD_LIBRARY_PATH=./lib ./rknn_yolov8_demo ~/AlertGateway/model/yolov8s.rknn model/bus.jpg
+```
+* **预期表现**：`rknn_run cost` 大部分时间波动在 **42ms - 52ms** 之间，均值约为 **48.8ms**。
+
+#### 方案 B：性能全锁死模式测试 (CPU/NPU 全锁 performance)
+运行以下命令开启性能锁定服务，并将系统核心锁满频测试推理耗时：
+```bash
+# 1. 启用性能锁定服务
+sudo systemctl start rockchip-performance
+
+# 2. 运行 demo 测试耗时
+cd ~/rknn_yolov8_demo_test
+LD_LIBRARY_PATH=./lib ./rknn_yolov8_demo ~/AlertGateway/model/yolov8s.rknn model/bus.jpg
+```
+* **预期表现**：从第 3 次迭代开始，时延极度稳定，锁定在 **32ms - 36ms** 之间，均值约为 **34.8ms**。
+
+#### 方案 C：工业级折中测试 (大核 lock, 小核 interactive)
+由于全核锁死在高性能下会带来较大的发热量，我们在工业级部署中可以使用以下差异化配置，仅锁定大核，放开小核：
+```bash
+# 1. 锁 NPU 和 大核为 performance，小核 policy0 恢复为 interactive 动态调节
+echo interactive | sudo tee /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
+echo performance | sudo tee /sys/devices/system/cpu/cpufreq/policy4/scaling_governor
+echo performance | sudo tee /sys/devices/system/cpu/cpufreq/policy6/scaling_governor
+echo performance | sudo tee /sys/class/devfreq/fdab0000.npu/governor
+
+# 2. 运行 demo 测试耗时
+cd ~/rknn_yolov8_demo_test
+LD_LIBRARY_PATH=./lib ./rknn_yolov8_demo ~/AlertGateway/model/yolov8s.rknn model/bus.jpg
+```
+* **预期表现**：纯推理时延依然能稳定在 **~33.8ms** 左右，与全锁定（方案B）基本无差别。证实了小核降频不影响推理，极佳地降低了功耗和温升。
+
+---
+
 ## 相关文件
 
 - `/home/rambos/arm_test/rknn_model_zoo` —— 官方 demo 仓库（本机，未纳入 AlertGateway 版本控制）
 - `npu_optimization_results.md`（memory）—— AlertGateway 自身 NPU 优化记录，本次结论与其互相印证
+
