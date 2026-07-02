@@ -1,0 +1,12 @@
+[Unit]
+Description=Lock CPU and NPU to Performance Mode
+After=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/rockchip_performance.sh enable
+ExecStop=/usr/local/bin/rockchip_performance.sh disable
+
+[Install]
+WantedBy=multi-user.target
