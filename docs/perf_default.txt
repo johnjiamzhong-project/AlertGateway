@@ -1,0 +1,24 @@
+# started on Thu Jul  2 17:25:48 2026
+
+
+ Performance counter stats for 'env LD_LIBRARY_PATH=./lib ./rknn_yolov8_demo /home/firefly/AlertGateway/model/yolov8s.rknn model/bus.jpg':
+
+            613.41 msec task-clock                #    0.322 CPUs utilized          
+             2,447      context-switches          #    3.989 K/sec                  
+                29      cpu-migrations            #   47.277 /sec                   
+             4,915      page-faults               #    8.013 K/sec                  
+       457,103,188      cycles                    #    0.745 GHz                    
+       601,500,442      instructions              #    1.32  insn per cycle         
+   <not supported>      branches                                                    
+         3,762,164      branch-misses                                               
+       165,566,011      L1-dcache-loads           #  269.912 M/sec                  
+         4,585,042      L1-dcache-load-misses     #    2.77% of all L1-dcache accesses
+         7,952,581      LLC-loads                 #   12.965 M/sec                  
+         3,452,655      LLC-load-misses           #   43.42% of all LL-cache accesses
+
+       1.907628417 seconds time elapsed
+
+       0.340768000 seconds user
+       0.307112000 seconds sys
+
+

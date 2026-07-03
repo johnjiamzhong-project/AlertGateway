@@ -7,7 +7,6 @@
 #include <map>
 #include <ctime>
 #include <nlohmann/json.hpp>
-
 using json = nlohmann::json;
 
 // 只保存引用/配置，不做任何 RKNN 或线程相关的初始化——真正的初始化都推迟到 start()，
@@ -43,6 +42,7 @@ void InferThread::start() {
     running_ = true;
     thread_ = std::thread(&InferThread::run, this);
 }
+
 
 // 置 running_=false 让 run() 循环在下一次检查时自行退出，join 等待线程真正结束，
 // 然后才释放 RKNN 资源——顺序很重要：线程没退出前不能销毁 ctx_/input_mem_，
@@ -230,6 +230,7 @@ std::string InferThread::summarize(const std::vector<Detection>& dets) {
 //   4) MQTT上报：按 report_interval_sec 节流，且内容跟 last_summary_ 相同时不重复推送。
 void InferThread::run() {
     constexpr int MODEL_W = 640, MODEL_H = 640;
+
     //step 就是"每隔多少帧做一次真正的 NPU 推理"，用来给推理降频。
     const int step = std::max(1, cfg_.infer_every_n_frames);
     std::vector<uint8_t> rgb_buf;

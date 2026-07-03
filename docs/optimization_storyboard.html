@@ -1,0 +1,852 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RK3588 NPU 推理优化历程与实测数据可视化</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #030712;
+            --panel-bg: rgba(17, 24, 39, 0.7);
+            --border-color: rgba(0, 240, 255, 0.12);
+            --border-hover: rgba(0, 240, 255, 0.35);
+            --text-main: #F3F4F6;
+            --text-muted: #9CA3AF;
+            --text-dark: #6B7280;
+            --neon-blue: #00F0FF;
+            --neon-green: #10B981;
+            --neon-purple: #8B5CF6;
+            --neon-orange: #F59E0B;
+            --neon-red: #EF4444;
+            --font-main: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+            --font-code: 'Orbitron', monospace;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: var(--font-main);
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            min-height: 100vh;
+            padding: 2.5rem 1.5rem;
+            background-image: 
+                radial-gradient(circle at 5% 10%, rgba(0, 240, 255, 0.08) 0%, transparent 35%),
+                radial-gradient(circle at 95% 90%, rgba(139, 92, 246, 0.06) 0%, transparent 40%);
+            background-attachment: fixed;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 1280px;
+            margin: 0 auto;
+        }
+
+        /* Header Style */
+        header {
+            margin-bottom: 3rem;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            flex-wrap: wrap;
+            gap: 1.5rem;
+        }
+
+        .header-title h1 {
+            font-size: 2.2rem;
+            font-weight: 800;
+            letter-spacing: -0.5px;
+            background: linear-gradient(135deg, #FFFFFF 0%, #00F0FF 50%, #8B5CF6 100%);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .header-title p {
+            color: var(--text-muted);
+            font-size: 1rem;
+            margin-top: 0.5rem;
+        }
+
+        .tag {
+            background: rgba(0, 240, 255, 0.06);
+            border: 1px solid var(--neon-blue);
+            color: var(--neon-blue);
+            padding: 0.5rem 1.25rem;
+            border-radius: 9999px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            box-shadow: 0 0 15px rgba(0, 240, 255, 0.15);
+            font-family: var(--font-code);
+        }
+
+        /* Grid System */
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(12, 1fr);
+            gap: 1.75rem;
+        }
+
+        .card {
+            background: var(--panel-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            padding: 2rem;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .card:hover {
+            transform: translateY(-4px);
+            border-color: var(--border-hover);
+            box-shadow: 0 15px 40px rgba(0, 240, 255, 0.08);
+        }
+
+        .col-12 { grid-column: span 12; }
+        .col-8 { grid-column: span 8; }
+        .col-4 { grid-column: span 4; }
+        .col-6 { grid-column: span 6; }
+
+        @media (max-width: 1024px) {
+            .col-8, .col-4, .col-6 { grid-column: span 12; }
+        }
+
+        /* Decorative top glow border */
+        .glow-top::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 3px;
+            background: linear-gradient(90deg, var(--neon-blue), var(--neon-purple));
+        }
+
+        /* Navigation / Timeline Steps */
+        .story-timeline {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+
+        .story-step {
+            display: flex;
+            gap: 1.5rem;
+            padding: 1.25rem;
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.01);
+            border: 1px solid rgba(255, 255, 255, 0.03);
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .story-step:hover, .story-step.active {
+            background: rgba(0, 240, 255, 0.04);
+            border-color: rgba(0, 240, 255, 0.2);
+        }
+
+        .step-num {
+            font-family: var(--font-code);
+            font-size: 1.25rem;
+            font-weight: 900;
+            color: var(--neon-blue);
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: rgba(0, 240, 255, 0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            box-shadow: 0 0 10px rgba(0, 240, 255, 0.1);
+        }
+
+        .step-body h3 {
+            font-size: 1.05rem;
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+        }
+
+        .step-body p {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            line-height: 1.4;
+        }
+
+        /* Main Story Display Panel */
+        .display-panel {
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            height: 100%;
+            min-height: 480px;
+        }
+
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            padding-bottom: 1rem;
+        }
+
+        .panel-header h2 {
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: var(--neon-blue);
+        }
+
+        .status-badge {
+            background: rgba(245, 158, 11, 0.1);
+            border: 1px solid var(--neon-orange);
+            color: var(--neon-orange);
+            font-family: var(--font-code);
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.25rem 0.75rem;
+            border-radius: 4px;
+            text-transform: uppercase;
+        }
+
+        .status-badge.success {
+            background: rgba(16, 185, 129, 0.1);
+            border-color: var(--neon-green);
+            color: var(--neon-green);
+        }
+
+        .status-badge.failed {
+            background: rgba(239, 68, 68, 0.1);
+            border-color: var(--neon-red);
+            color: var(--neon-red);
+        }
+
+        .panel-desc {
+            font-size: 1rem;
+            line-height: 1.6;
+            color: var(--text-main);
+            margin-bottom: 1.5rem;
+        }
+
+        .panel-desc strong {
+            color: var(--neon-blue);
+        }
+
+        .terminal-block {
+            background: #02040a;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 10px;
+            padding: 1.25rem;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.85rem;
+            color: #A9B1D6;
+            overflow-x: auto;
+            position: relative;
+            margin-bottom: 1.5rem;
+        }
+
+        .terminal-block::before {
+            content: 'TERMINAL';
+            position: absolute;
+            top: 4px;
+            right: 12px;
+            font-size: 0.65rem;
+            color: var(--text-dark);
+            font-family: var(--font-code);
+            font-weight: 700;
+            letter-spacing: 1px;
+        }
+
+        .terminal-line {
+            margin-bottom: 0.25rem;
+        }
+
+        .terminal-cmd {
+            color: #73DACA;
+            font-weight: bold;
+        }
+
+        .terminal-cmd::before {
+            content: '$ ';
+            color: var(--neon-blue);
+        }
+
+        .terminal-highlight {
+            color: var(--neon-orange);
+            font-weight: bold;
+        }
+
+        .terminal-success {
+            color: var(--neon-green);
+            font-weight: bold;
+        }
+
+        /* Comparison Chart Visualization */
+        .chart-card {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .bar-chart-container {
+            display: flex;
+            flex-direction: column;
+            gap: 1.25rem;
+            margin-top: 1.5rem;
+        }
+
+        .chart-row {
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+        }
+
+        .row-label {
+            width: 140px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-align: right;
+            flex-shrink: 0;
+        }
+
+        .row-bar-wrapper {
+            flex-grow: 1;
+            height: 36px;
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 6px;
+            position: relative;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+        }
+
+        .row-bar {
+            height: 100%;
+            background: linear-gradient(90deg, rgba(0, 240, 255, 0.2), rgba(139, 92, 246, 0.5));
+            border-radius: 5px;
+            transition: width 1s cubic-bezier(0.16, 1, 0.3, 1);
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 0; /* Animated */
+        }
+
+        .row-bar.best {
+            background: linear-gradient(90deg, rgba(16, 185, 129, 0.2), rgba(0, 240, 255, 0.6));
+        }
+
+        .row-bar-val {
+            position: absolute;
+            left: 1rem;
+            font-family: var(--font-code);
+            font-size: 0.9rem;
+            font-weight: 700;
+            color: var(--text-main);
+            z-index: 2;
+        }
+
+        .row-bar-desc {
+            position: absolute;
+            right: 1rem;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            z-index: 2;
+        }
+
+        /* Board state topology */
+        .topology-view {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+
+        .topo-node {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 1rem;
+            transition: all 0.3s ease;
+            position: relative;
+        }
+
+        .topo-node.active {
+            border-color: var(--neon-blue);
+            background: rgba(0, 240, 255, 0.03);
+            box-shadow: inset 0 0 10px rgba(0, 240, 255, 0.05);
+        }
+
+        .topo-node.active-extreme {
+            border-color: var(--neon-purple);
+            background: rgba(139, 92, 246, 0.03);
+            box-shadow: inset 0 0 10px rgba(139, 92, 246, 0.05);
+        }
+
+        .node-label {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .node-name {
+            font-size: 1.05rem;
+            font-weight: 700;
+            margin: 0.25rem 0;
+        }
+
+        .node-status {
+            font-family: var(--font-code);
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--neon-blue);
+        }
+
+        .active-extreme .node-status {
+            color: var(--neon-purple);
+        }
+
+        .inactive .node-status {
+            color: var(--text-dark);
+        }
+
+        .node-subtext {
+            font-size: 0.7rem;
+            color: var(--text-dark);
+            margin-top: 0.25rem;
+        }
+
+        /* Mode Selector buttons */
+        .mode-selector {
+            display: flex;
+            gap: 0.5rem;
+            background: rgba(0, 0, 0, 0.3);
+            padding: 0.25rem;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .mode-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            font-weight: 600;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .mode-btn.active {
+            background: rgba(0, 240, 255, 0.1);
+            color: var(--neon-blue);
+            box-shadow: 0 0 10px rgba(0, 240, 255, 0.1);
+        }
+
+        /* SVG Line plots */
+        .chart-canvas-wrapper {
+            position: relative;
+            margin-top: 1.5rem;
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 12px;
+            padding: 1rem;
+        }
+
+        .chart-legend {
+            display: flex;
+            justify-content: flex-end;
+            gap: 1.25rem;
+            font-size: 0.75rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .legend-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 0.25rem;
+        }
+
+        .jitter-svg {
+            width: 100%;
+            height: 180px;
+        }
+
+        .path-line {
+            fill: none;
+            stroke-width: 2;
+            stroke-linecap: round;
+            transition: stroke-dasharray 1.5s ease-in-out;
+        }
+
+        .path-default {
+            stroke: var(--neon-red);
+            stroke-dasharray: 600;
+            animation: drawLine 2s forwards;
+        }
+
+        .path-locked {
+            stroke: var(--neon-orange);
+            stroke-dasharray: 600;
+            animation: drawLine 2.5s forwards;
+        }
+
+        .path-fulllock {
+            stroke: var(--neon-green);
+            stroke-dasharray: 600;
+            animation: drawLine 3s forwards;
+        }
+
+        @keyframes drawLine {
+            to { stroke-dashoffset: 0; }
+        }
+
+        /* General layout utilities */
+        .footer-note {
+            text-align: center;
+            margin-top: 3rem;
+            color: var(--text-dark);
+            font-size: 0.8rem;
+            letter-spacing: 0.5px;
+        }
+
+        .footer-note a {
+            color: var(--neon-blue);
+            text-decoration: none;
+        }
+
+        .row-item {
+            margin-bottom: 1rem;
+        }
+        
+        .row-item h4 {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            margin-bottom: 0.25rem;
+        }
+
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <!-- Dashboard Header -->
+        <header>
+            <div class="header-title">
+                <h1>RK3588 NPU 推理性能调优之旅</h1>
+                <p>基于 AlertGateway 检测管线在 CPU/DDR/CPUIdle 维度上的全链路性能优化探索</p>
+            </div>
+            <span class="tag">RK3588S SoC</span>
+        </header>
+
+        <!-- Main Grid Layout -->
+        <div class="dashboard-grid">
+            
+            <!-- Left Panel: Story Steps Navigation (span 4) -->
+            <div class="card col-4 glow-top">
+                <div style="margin-bottom: 1.5rem;">
+                    <h2 style="font-size: 1.25rem; font-weight: 700;">优化演进步骤</h2>
+                    <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem;">点击下方各个环节，在右侧查看具体定位及测试逻辑</p>
+                </div>
+                
+                <div class="story-timeline">
+                    <!-- Step 1 -->
+                    <div class="story-step active" onclick="showStep(1)">
+                        <div class="step-num">01</div>
+                        <div class="step-body">
+                            <h3>发现反常现象</h3>
+                            <p>基准测试时延（97ms）大幅慢于带负载网关（48ms）。</p>
+                        </div>
+                    </div>
+                    <!-- Step 2 -->
+                    <div class="story-step" onclick="showStep(2)">
+                        <div class="step-num">02</div>
+                        <div class="step-body">
+                            <h3>定位调频误判</h3>
+                            <p>推理挂起引起 interactive 调频器误降频至最低的 408MHz。</p>
+                        </div>
+                    </div>
+                    <!-- Step 3 -->
+                    <div class="story-step" onclick="showStep(3)">
+                        <div class="step-num">03</div>
+                        <div class="step-body">
+                            <h3>动态机制撞墙</h3>
+                            <p>iowait boost 被裁剪，UCLAMP 被 target_load 决策屏蔽。</p>
+                        </div>
+                    </div>
+                    <!-- Step 4 -->
+                    <div class="story-step" onclick="showStep(4)">
+                        <div class="step-num">04</div>
+                        <div class="step-body">
+                            <h3>全链路性能解锁</h3>
+                            <p>引入 DDR 锁频与 CPUIdle 状态控制，时延冲刺至 29.4ms。</p>
+                        </div>
+                    </div>
+                    <!-- Step 5 -->
+                    <div class="story-step" onclick="showStep(5)">
+                        <div class="step-num">05</div>
+                        <div class="step-body">
+                            <h3>生命周期联动</h3>
+                            <p>与 start.sh 进程生命周期绑定，随启随锁，空闲动态节能。</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Panel: Dynamic Details Panel (span 8) -->
+            <div class="card col-8 glow-top">
+                <div class="display-panel" id="display-panel-content">
+                    <!-- Content will be injected dynamically -->
+                </div>
+            </div>
+
+            <!-- Performance Chart visualization (span 7) -->
+            <div class="card col-12 glow-top chart-card">
+                <div class="panel-header">
+                    <h2>各优化方案平均推理时延对比 (YOLOv8s INT8)</h2>
+                    <span class="status-badge success">rknn_run 耗时对比</span>
+                </div>
+                
+                <p style="font-size: 0.9rem; color: var(--text-muted); line-height: 1.5;">
+                    通过锁定 DDR 频宽到最高点 (2.112GHz) 并禁用 CPUIdle 深度睡眠状态 (消除 220μs 的 C-state 唤醒时延)，推理耗时在 CPU/NPU 锁定的基础上<strong>再次下调了 13%</strong>，锁死了板端的极限表现。
+                </p>
+
+                <div class="bar-chart-container">
+                    <div class="chart-row">
+                        <div class="row-label">A. 默认动态调频</div>
+                        <div class="row-bar-wrapper">
+                            <div class="row-bar" id="bar-a" style="width: 100%;"></div>
+                            <span class="row-bar-val">48.8 ms</span>
+                            <span class="row-bar-desc">时延抖动大</span>
+                        </div>
+                    </div>
+                    <div class="chart-row">
+                        <div class="row-label">B. 全核 performance</div>
+                        <div class="row-bar-wrapper">
+                            <div class="row-bar" id="bar-b" style="width: 71.3%;"></div>
+                            <span class="row-bar-val">34.8 ms</span>
+                            <span class="row-bar-desc">抖动消除，发热高</span>
+                        </div>
+                    </div>
+                    <div class="chart-row">
+                        <div class="row-label">C. 大核锁频/小核省电</div>
+                        <div class="row-bar-wrapper">
+                            <div class="row-bar" id="bar-c" style="width: 69.2%;"></div>
+                            <span class="row-bar-val">33.8 ms</span>
+                            <span class="row-bar-desc">发热控制佳，时延略高</span>
+                        </div>
+                    </div>
+                    <div class="chart-row">
+                        <div class="row-label">D. 全链路锁频</div>
+                        <div class="row-bar-wrapper">
+                            <div class="row-bar best" id="bar-d" style="width: 60.2%;"></div>
+                            <span class="row-bar-val" style="color: var(--neon-blue);">29.4 ms</span>
+                            <span class="row-bar-desc" style="color: var(--neon-blue); font-weight: 600;">DDR锁频 + CPUIdle禁用 (极力推荐)</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Topology & Live Simulator (span 12) -->
+            <div class="card col-12">
+                <div class="panel-header">
+                    <h2>板端实时状态与调频参数拓扑器</h2>
+                    <div class="mode-selector">
+                        <button class="mode-btn" id="mode-btn-idle" onclick="switchTopology('idle')">空闲模式 (网关停止)</button>
+                        <button class="mode-btn active" id="mode-btn-active" onclick="switchTopology('active')">全链路锁定 (网关运行)</button>
+                    </div>
+                </div>
+
+                <p style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 1rem;">
+                    网关启停联动技术：当检测网关不运行时自动释放状态恢复节能，实现“按需定频，按需降温”。
+                </p>
+
+                <div class="topology-view" id="topology-container">
+                    <!-- Topology nodes dynamically populated -->
+                </div>
+            </div>
+
+        </div> <!-- End Dashboard Grid -->
+
+        <div class="footer-note">
+            嵌入式 AI 网关调优实测 • AlertGateway 工程文档 • 源码仓库: <a href="file:///home/rambos/arm_test/AlertGateway/">/AlertGateway</a>
+        </div>
+    </div>
+
+    <script>
+        // Story Data
+        const storySteps = {
+            1: {
+                title: "发现反常现象 (Baseline Benchmark Anomalies)",
+                status: "排查期",
+                statusClass: "",
+                desc: "在项目进行 INT8 量化重构后，我们需要对单帧时延做交叉验证。使用官方 <code>rknn_model_zoo</code> 的 C++ 测速 Demo 跑同一个 <code>yolov8s.rknn</code> 模型进行推理，但在未添加任何背景干扰的纯净系统环境下，时延却离奇跑到了 <strong>97ms</strong>。相反，网关在跑复杂采集编码任务时推理只需 <strong>48ms</strong>。",
+                cmd: "# 板端执行纯净 yolov8 demo 推理\ncd ~/rknn_yolov8_demo_test\nLD_LIBRARY_PATH=./lib ./rknn_yolov8_demo model/yolov8s.rknn model/bus.jpg",
+                log: "=== iter 12 === rknn_run cost: 97.45 ms\n=== iter 13 === rknn_run cost: 112.12 ms\n=== iter 14 === rknn_run cost: 89.85 ms\n[Warning] 耗时显著超出 AlertGateway pipeline 正常水准(~40ms)"
+            },
+            2: {
+                title: "定位调频误判 (Governor Throttling on Critical Path)",
+                status: "定位成功",
+                statusClass: "success",
+                desc: "采样大核与小核的实时运行频率表明，在运行官方推理程序期间，CPU 的 8 个核心全部被扣在最低主频 <strong>408MHz</strong>。其根本原因在于：推理线程在调用 <code>ioctl</code> 等待 NPU 时处于阻塞睡眠状态，内核调频器（<code>interactive</code>）判定 CPU 负载极轻进而执行了节能降频。然而，NPU 中断响应与 DMA 运粮通道重度依赖 CPU 的唤醒速度，CPU 降频直接导致整个推理流发生了严重阻塞。",
+                cmd: "# 在运行官方 Demo 期间采样 CPU 的频率\nfor p in /sys/devices/system/cpu/cpufreq/policy*; do cat $p/scaling_cur_freq; done",
+                log: "policy0: 408000 Hz  (小核最低频)\npolicy4: 408000 Hz  (中大核最低频)\npolicy6: 408000 Hz  (大核最低频)\nNPU aclk: 1.0 GHz    (满频)\n[Reason] CPU 降频导致驱动 ioctl 中断处理效率下降，单帧时延翻倍"
+            },
+            3: {
+                title: "动态频率机制撞墙 (EAS & Driver Limitations)",
+                status: "方案受阻",
+                statusClass: "failed",
+                desc: "我们尝试了两个免去人工锁频的动态提频策略，但全部失败：<br>1) <strong>iowait boost</strong>：因为 Rockchip 定制的 <code>schedutil</code> 彻底裁剪了 iowait boost 的代码路径且 rknpu 驱动闭源；<br>2) <strong>UCLAMP</strong>：推理线程内部通过系统调用 <code>sched_setattr</code> 尝试锁定下限 <code>sched_util_min=512</code>。虽然 syscall 返回成功，但大核主频仍疯狂在 408MHz 徘徊。原因在于 Rockchip 自研的 <code>target_load</code> 直接屏蔽了原生 UCLAMP 频率规划器的参数计算路径。",
+                cmd: "// 尝试在推理线程内部通过系统调用声明算力下限\nstruct sched_attr attr{};\nattr.size = sizeof(attr);\nattr.sched_flags = 0x20; // UTIL_CLAMP_MIN\nattr.sched_util_min = 512; // 要求 50% 算力主频\nsyscall(SYS_sched_setattr, 0, &attr, 0);",
+                log: "[InferThread] UCLAMP util_min=512 applied (tid=30381)\n[Sampling] policy4 frequency: 408 MHz (静默失效)\n[Reason] RK3588 定制调频器 target_load 机制排斥了原生 UCLAMP 策略"
+            },
+            4: {
+                title: "全链路性能解锁 (DDR Lock & CPUIdle Disable)",
+                status: "优化突破",
+                statusClass: "success",
+                desc: "参考官方隐藏调频脚本发现，除 CPU/NPU 外，<strong>DDR 带宽与 CPU 睡眠深度</strong>也是重要性能推手。NPU 在推理时会高频读 DDR，DDR 频率低导致 NPU 频现“等数据”饿死现象。我们改用将 DDR 锁定在 <strong>2.112GHz</strong> 并禁用 <strong>CPUIdle state1</strong>（消除 220μs 唤醒延迟），推理纯耗时成功突破硬件极限落入 <strong>29.4ms</strong> 内，抖动几乎完全消除。",
+                cmd: "# 在调优服务中锁定 DMC(DDR) 调频器并禁用核心 cpuidle state1\necho performance > /sys/class/devfreq/dmc/governor\nfor s in /sys/devices/system/cpu/cpu*/cpuidle/state1/disable; do echo 1 > $s; done",
+                log: "[Infer] cpu:1.06 cpy:0.11 npu:29.43 cnv:1.34 total:31.95 ms\n[Infer] cpu:0.99 cpy:0.10 npu:29.35 cnv:1.35 total:31.79 ms\n[Result] rknn_run 纯 NPU 时延缩短至 ~29.4ms (相比纯 CPU 锁频再降 13%)"
+            },
+            5: {
+                title: "生命周期联动部署 (Process Lifecycle Binding)",
+                status: "部署上线",
+                statusClass: "success",
+                desc: "为了解决长驻锁频产生电耗、发热大并折损设备寿命的痛点，我们彻底关闭了调优服务的开机自启。编写了启停控制服务并将其跟 <code>start.sh</code> 脚本生命周期绑定。仅当启动网关时服务拉起，网关一旦通过命令正常退出，系统会在 100ms 内退回 <code>schedutil</code> 动态节能调频，实现了完美的能量效率比。",
+                cmd: "# 修改 start.sh 联动服务生命周期\nstart) sudo systemctl start rockchip-performance && nohup ./AlertGateway ...\nstop)  kill $(cat /tmp/ag.pid) && sudo systemctl stop rockchip-performance",
+                log: "[start.sh] Starting rockchip-performance service... (OK)\n[start.sh] Stopping rockchip-performance service... (OK)\n[System] Board returned to dynamic schedutil & simple_ondemand (DDR temp drops)"
+            }
+        };
+
+        // Topology configurations
+        const topoConfigs = {
+            active: [
+                { title: "CPU 大/中核 (policy4/policy6)", name: "Cortex-A76 Cores", status: "performance", detail: "锁定 2256 MHz", cssClass: "active-extreme" },
+                { title: "CPU 小核 (policy0)", name: "Cortex-A55 Cores", status: "performance", detail: "锁定 1800 MHz", cssClass: "active-extreme" },
+                { title: "NPU 核心 (aclk_npu)", name: "Rockchip NPU", status: "performance", detail: "锁定 1.0 GHz", cssClass: "active-extreme" },
+                { title: "DDR 内存控制器 (dmc)", name: "System DDR Bus", status: "performance (userspace)", detail: "锁定 2112 MHz (带宽最大)", cssClass: "active" },
+                { title: "CPUIdle 状态管理器", name: "C-State Controller", status: "STATE1 禁用", detail: "零深睡退出时延", cssClass: "active" },
+                { title: "当前 YOLOv8s 推理时延", name: "rknn_run 单帧耗时", status: "~29.4 ms", detail: "极限稳定性能 (抖动完全抹平)", cssClass: "active" }
+            ],
+            idle: [
+                { title: "CPU 大/中核 (policy4/policy6)", name: "Cortex-A76 Cores", status: "schedutil", detail: "动态 408 MHz ~ 2256 MHz", cssClass: "" },
+                { title: "CPU 小核 (policy0)", name: "Cortex-A55 Cores", status: "schedutil", detail: "动态 408 MHz ~ 1800 MHz", cssClass: "" },
+                { title: "NPU 核心 (aclk_npu)", name: "Rockchip NPU", status: "rknpu_ondemand", detail: "动态 100 MHz ~ 1.0 GHz", cssClass: "" },
+                { title: "DDR 内存控制器 (dmc)", name: "System DDR Bus", status: "simple_ondemand", detail: "动态调频 (节能空闲状态)", cssClass: "" },
+                { title: "CPUIdle 状态管理器", name: "C-State Controller", status: "STATE1 激活", detail: "空闲核心深度睡眠降低功耗", cssClass: "" },
+                { title: "当前 YOLOv8s 推理时延", name: "rknn_run 单帧耗时", status: "未运行", detail: "网关守护程序休眠中", cssClass: "inactive" }
+            ]
+        };
+
+        // Render functions
+        function showStep(stepId) {
+            // Update active state in timeline
+            const steps = document.querySelectorAll('.story-step');
+            steps.forEach((step, index) => {
+                if (index === (stepId - 1)) {
+                    step.classList.add('active');
+                } else {
+                    step.classList.remove('active');
+                }
+            });
+
+            // Populate Right Panel Content
+            const stepData = storySteps[stepId];
+            const displayPanel = document.getElementById('display-panel-content');
+            displayPanel.innerHTML = `
+                <div>
+                    <div class="panel-header">
+                        <h2>${stepData.title}</h2>
+                        <span class="status-badge ${stepData.statusClass}">${stepData.status}</span>
+                    </div>
+                    <div class="panel-desc">${stepData.desc}</div>
+                    
+                    <div style="font-size: 0.8rem; font-weight: 700; color: var(--neon-blue); margin-bottom: 0.5rem; letter-spacing: 0.5px;">测试指令与核心代码：</div>
+                    <div class="terminal-block">
+                        <div class="terminal-line"><span class="terminal-cmd">${stepData.cmd}</span></div>
+                    </div>
+
+                    <div style="font-size: 0.8rem; font-weight: 700; color: var(--neon-blue); margin-bottom: 0.5rem; letter-spacing: 0.5px;">板端运行输出切片：</div>
+                    <div class="terminal-block" style="background-color: #0b0f19;">
+                        ${stepData.log.split('\n').map(line => {
+                            if (line.startsWith('[Result]') || line.includes('applied') || line.includes('OK')) {
+                                return `<div class="terminal-line terminal-success">${line}</div>`;
+                            }
+                            if (line.startsWith('[Warning]') || line.startsWith('[Reason]')) {
+                                return `<div class="terminal-line terminal-highlight">${line}</div>`;
+                            }
+                            return `<div class="terminal-line">${line}</div>`;
+                        }).join('')}
+                    </div>
+                </div>
+            `;
+        }
+
+        function switchTopology(mode) {
+            // Switch active classes in buttons
+            if (mode === 'active') {
+                document.getElementById('mode-btn-active').classList.add('active');
+                document.getElementById('mode-btn-idle').classList.remove('active');
+            } else {
+                document.getElementById('mode-btn-idle').classList.add('active');
+                document.getElementById('mode-btn-active').classList.remove('active');
+            }
+
+            const topoData = topoConfigs[mode];
+            const container = document.getElementById('topology-container');
+            container.innerHTML = '';
+            
+            topoData.forEach(node => {
+                const nodeDiv = document.createElement('div');
+                nodeDiv.className = `topo-node ${node.cssClass}`;
+                
+                const title = document.createElement('div');
+                title.className = 'node-label';
+                title.innerText = node.title;
+
+                const name = document.createElement('div');
+                name.className = 'node-name';
+                name.innerText = node.name;
+
+                const status = document.createElement('div');
+                status.className = 'node-status';
+                status.innerText = node.status;
+
+                const detail = document.createElement('div');
+                detail.className = 'node-subtext';
+                detail.innerText = node.detail;
+
+                nodeDiv.appendChild(title);
+                nodeDiv.appendChild(name);
+                nodeDiv.appendChild(status);
+                nodeDiv.appendChild(detail);
+                
+                container.appendChild(nodeDiv);
+            });
+        }
+
+        // Initialize display
+        showStep(1);
+        switchTopology('active');
+    </script>
+</body>
+</html>

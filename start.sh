@@ -12,6 +12,10 @@ case "${1:-start}" in
       exit 0
     fi
     cd "$APP_DIR"
+    # 启动前开启锁频服务（大核/DDR锁频，禁用cpuidle）
+    echo "Starting rockchip-performance service..."
+    sudo systemctl start rockchip-performance
+    
     nohup "$BINARY" "$CONFIG" >> "$LOG" 2>&1 &
     echo $! > "$PIDFILE"
     echo "Started AlertGateway (PID $!), log: $LOG"
@@ -24,6 +28,9 @@ case "${1:-start}" in
     else
       pkill -SIGINT -f AlertGateway && echo "Stopped" || echo "Not running"
     fi
+    # 停止后自动恢复为默认调频模式（省电与降低发热）
+    echo "Stopping rockchip-performance service..."
+    sudo systemctl stop rockchip-performance
     ;;
   status)
     if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
