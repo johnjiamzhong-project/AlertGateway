@@ -36,7 +36,7 @@ private:
     bool init_mpp();     // 创建MPP编码上下文、配置参数、申请DRM buffer group，详见 .cpp
     void deinit_mpp();   // 按创建的反顺序释放 buf_group_/ctx_
 
-    // YUYV422 → NV12(YUV420SP) 直转，不经过RGB中间格式；MPP硬编码器只吃NV12，详见 .cpp
+    // YUYV422 → NV12(YUV420SP) CPU兜底路径，仅在 RGA 硬件失败时使用，详见 .cpp
     static void yuyv_to_nv12(const uint8_t* yuyv, uint8_t* nv12, int w, int h);
     // 在NV12的Y/UV平面上直接画线/画框，没有用任何图形库，详见 .cpp
     static void draw_hline_nv12(uint8_t* nv12, int w, int h, int x0, int x1, int y,

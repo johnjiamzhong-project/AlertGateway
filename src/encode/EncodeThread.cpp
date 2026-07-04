@@ -6,6 +6,25 @@
 #include <vector>
 #include <chrono>
 #include "mpp_meta.h"
+#include "im2d.h"
+#include "rga.h"
+
+static bool rga_yuyv_to_nv12(const uint8_t* src, uint8_t* dst, int w, int h) {
+    rga_buffer_t src_buf = wrapbuffer_virtualaddr(
+        const_cast<uint8_t*>(src), w, h, RK_FORMAT_YUYV_422);
+    rga_buffer_t dst_buf = wrapbuffer_virtualaddr(dst, w, h, RK_FORMAT_YCbCr_420_SP);
+    rga_buffer_t pat_buf{};
+
+    im_rect srect{0, 0, w, h};
+    im_rect drect{0, 0, w, h};
+    im_rect prect{0, 0, 0, 0};
+
+    IM_STATUS ret = improcess(src_buf, dst_buf, pat_buf, srect, drect, prect, 0);
+    if (ret <= 0) {
+        return false;
+    }
+    return true;
+}
 
 // 只保存引用/配置，不做MPP初始化——跟 InferThread 一样，真正的初始化推迟到 start()，
 // 失败统一在 start() 里抛异常处理。
@@ -163,10 +182,10 @@ void EncodeThread::draw_rect_nv12(uint8_t* nv12, int w, int h,
 //   1) 从 in_queue_ 阻塞取一帧（200ms超时，超时则continue重新检查running_）。
 //      跟 InferThread 不同，这里不排空积压帧——enc_queue 容量只有1，本身就形成背压，
 //      没有"攒帧"的空间，按顺序逐帧编码才能保证视频流畅不丢帧。
-//   2) YUYV422→NV12 直转（纯CPU，无RGA加速）。
+//   2) YUYV422→NV12 直转（RGA硬件优先，失败回退CPU）。
 //   3) 叠框：从 shared_dets_ 读最新一次推理结果（可能是上一帧甚至更早的，不强求对齐），
 //      直接在NV12像素上画绿框。
-//   4) 喂给MPP硬编码器：从DRM buffer group取一块物理内存，memcpy进NV12数据，
+//   4) 喂给MPP硬编码器：从DRM buffer group取一块物理内存，RGA直接写入（省掉memcpy），
 //      包装成MppFrame调 encode_put_frame()；PTS按 frame_idx_*1000/fps 线性递推
 //      （假设严格匀速出帧，没有用实际墙钟时间戳）。
 //   5) 取编码结果：encode_put_frame/encode_get_packet 是异步关系，硬件内部有流水线
@@ -177,6 +196,7 @@ void EncodeThread::run() {
     const int w = cfg_.width, h = cfg_.height;
     const size_t frame_size = static_cast<size_t>(w * h * 3 / 2);  // NV12: w*h(Y) + w*h/2(UV)
     std::vector<uint8_t> nv12_buf(frame_size);
+    int rga_fail_count = 0;
 
     // 绿色在BT.601 YCbCr下对应：Y=145, Cb=54, Cr=34
     constexpr uint8_t BOX_Y = 145, BOX_U = 54, BOX_V = 34;
@@ -189,23 +209,30 @@ void EncodeThread::run() {
         if (!in_queue_.pop(frame, 200)) continue;
         if (frame.raw_data.empty()) continue;
 
-        // YUYV → NV12 直转（不经过RGB中间格式）
-        yuyv_to_nv12(frame.raw_data.data(), nv12_buf.data(), w, h);
+        // 先从 DRM 池取 buffer，让 RGA 转换结果直接写入，省掉一次 memcpy
+        MppBuffer frame_buf = nullptr;
+        mpp_buffer_get(buf_group_, &frame_buf, frame_size);
+        uint8_t* drm_ptr = static_cast<uint8_t*>(mpp_buffer_get_ptr(frame_buf));
 
-        // 直接在NV12上叠最新一次的检测框
+        // YUYV → NV12：RGA 直接写入 DRM buffer，失败时回退 CPU + memcpy 兜底
+        bool rga_ok = rga_yuyv_to_nv12(frame.raw_data.data(), drm_ptr, w, h);
+        if (!rga_ok) {
+            yuyv_to_nv12(frame.raw_data.data(), nv12_buf.data(), w, h);
+            memcpy(drm_ptr, nv12_buf.data(), frame_size);
+            if (++rga_fail_count % 30 == 1) {
+                std::cerr << "[Encode] RGA yuyv_to_nv12 failed, using CPU fallback ("
+                          << rga_fail_count << " times)\n" << std::flush;
+            }
+        }
+
+        // 直接在 DRM buffer 上叠最新一次的检测框
         auto dets = shared_dets_.get();
         for (const auto& det : dets) {
-            draw_rect_nv12(nv12_buf.data(), w, h,
+            draw_rect_nv12(drm_ptr, w, h,
                            static_cast<int>(det.x1), static_cast<int>(det.y1),
                            static_cast<int>(det.x2), static_cast<int>(det.y2),
                            2, BOX_Y, BOX_U, BOX_V);
         }
-
-        // 把NV12喂给MPP：从DRM buffer group取一块硬件可DMA访问的内存，
-        // memcpy进去（这次拷贝理论上可省，待优化），再包装成MppFrame喂给编码器
-        MppBuffer frame_buf = nullptr;
-        mpp_buffer_get(buf_group_, &frame_buf, frame_size);
-        memcpy(mpp_buffer_get_ptr(frame_buf), nv12_buf.data(), frame_size);
 
         MppFrame mpp_frame = nullptr;
         mpp_frame_init(&mpp_frame);
