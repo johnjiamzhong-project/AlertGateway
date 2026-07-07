@@ -46,7 +46,8 @@ int main(int argc, char* argv[]) {
         cfg["model"]["conf_threshold"].get<float>(),
         cfg["model"]["iou_threshold"].get<float>(),
         cfg["detection"]["target_classes"].get<std::vector<std::string>>(),
-        cfg["model"].value("infer_every_n_frames", 1)
+        cfg["model"].value("infer_every_n_frames", 1),
+        cfg["model"].value("output_layout", std::string("decoded"))
     };
 
     // 检测上报配置：MQTT 上报周期（秒），结果有变化时才上报
@@ -54,11 +55,13 @@ int main(int argc, char* argv[]) {
         cfg["detection"]["report_interval_sec"].get<int>()
     };
 
-    // 编码配置：分辨率和帧率直接复用摄像头配置，供 MPP 硬编初始化使用
+    // 编码配置：分辨率和帧率复用摄像头配置；码率和文字标签可独立调节
     EncodeConfig enc_cfg{
         cam_cfg.width,
         cam_cfg.height,
-        cam_cfg.fps
+        cam_cfg.fps,
+        cfg["stream"].value("bitrate_kbps", 2000),
+        cfg["stream"].value("draw_detection_labels", true)
     };
 
     // 推流配置：RTMP 地址 + 分辨率/帧率（用于 FFmpeg AVStream 参数）

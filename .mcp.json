@@ -2,7 +2,7 @@
   "mcpServers": {
     "board": {
       "command": "python3",
-      "args": ["${CLAUDE_PROJECT_DIR}/tools/board_mcp.py"]
+      "args": ["/home/rambos/arm_test/AlertGateway/tools/board_mcp.py"]
     }
   }
 }

@@ -1,4 +1,7 @@
 #include "encode/EncodeThread.hpp"
+#define FONT8x16_IMPLEMENTATION
+#include "encode/font8x16.h"
+#include "encode/font16x16.h"
 #include <stdexcept>
 #include <iostream>
 #include <algorithm>
@@ -24,6 +27,16 @@ static bool rga_yuyv_to_nv12(const uint8_t* src, uint8_t* dst, int w, int h) {
         return false;
     }
     return true;
+}
+
+static std::string get_display_label(const std::string& label) {
+    if (label == "cell phone") return "手机";
+    if (label == "cup") return "杯子";
+    if (label == "keyboard") return "键盘";
+    if (label == "mouse") return "鼠标";
+    if (label == "laptop") return "笔记本";
+    if (label == "book") return "书";
+    return label;
 }
 
 // 只保存引用/配置，不做MPP初始化——跟 InferThread 一样，真正的初始化推迟到 start()，
@@ -177,6 +190,208 @@ void EncodeThread::draw_rect_nv12(uint8_t* nv12, int w, int h,
     }
 }
 
+void EncodeThread::draw_solid_rect_nv12(uint8_t* nv12, int w, int h,
+                                         int x1, int y1, int x2, int y2,
+                                         uint8_t yv, uint8_t uv, uint8_t vv) {
+    x1 = std::max(0, std::min(x1, w - 1));
+    x2 = std::max(0, std::min(x2, w - 1));
+    y1 = std::max(0, std::min(y1, h - 1));
+    y2 = std::max(0, std::min(y2, h - 1));
+    if (x1 > x2 || y1 > y2) return;
+
+    uint8_t* y_plane  = nv12;
+    uint8_t* uv_plane = nv12 + w * h;
+
+    for (int y = y1; y <= y2; ++y) {
+        std::memset(y_plane + y * w + x1, yv, x2 - x1 + 1);
+    }
+
+    int uv_y1 = y1 >> 1;
+    int uv_y2 = y2 >> 1;
+    int uv_x1 = x1 & ~1;
+    int uv_x2 = (x2 & ~1) + 1;
+    if (uv_x2 >= w) uv_x2 = w - 1;
+
+    for (int uy = uv_y1; uy <= uv_y2; ++uy) {
+        uint8_t* row_ptr = uv_plane + uy * w;
+        for (int ux = uv_x1; ux <= uv_x2; ux += 2) {
+            row_ptr[ux]     = uv;
+            row_ptr[ux + 1] = vv;
+        }
+    }
+}
+
+void EncodeThread::draw_char_nv12(uint8_t* nv12, int w, int h,
+                                   int x, int y, char ch,
+                                   uint8_t text_y, uint8_t text_u, uint8_t text_v) {
+    if (ch < 0 || ch >= 128) return;
+
+    const unsigned char* glyph = font8x16[static_cast<int>(ch)];
+    uint8_t* y_plane  = nv12;
+    uint8_t* uv_plane = nv12 + w * h;
+
+    for (int r = 0; r < 16; ++r) {
+        int py = y + r;
+        if (py < 0 || py >= h) continue;
+
+        unsigned char row_val = glyph[r];
+        for (int c = 0; c < 8; ++c) {
+            int px = x + c;
+            if (px < 0 || px >= w) continue;
+
+            if ((row_val >> (7 - c)) & 1) {
+                y_plane[py * w + px] = text_y;
+
+                int uy = py >> 1;
+                int ux = px & ~1;
+                uv_plane[uy * w + ux]     = text_u;
+                uv_plane[uy * w + ux + 1] = text_v;
+            }
+        }
+    }
+}
+
+void EncodeThread::draw_chinese_char_nv12(uint8_t* nv12, int w, int h,
+                                           int x, int y, const std::string& chinese_char,
+                                           uint8_t text_y, uint8_t text_u, uint8_t text_v) {
+    const uint8_t* glyph = nullptr;
+    for (const auto& item : font16x16) {
+        if (item.utf8 == chinese_char) {
+            glyph = &item.bitmap[0][0];
+            break;
+        }
+    }
+    if (!glyph) return;
+
+    uint8_t* y_plane  = nv12;
+    uint8_t* uv_plane = nv12 + w * h;
+
+    for (int r = 0; r < 16; ++r) {
+        int py = y + r;
+        if (py < 0 || py >= h) continue;
+
+        uint8_t b1 = glyph[r * 2];
+        uint8_t b2 = glyph[r * 2 + 1];
+
+        for (int c = 0; c < 8; ++c) {
+            int px = x + c;
+            if (px < 0 || px >= w) continue;
+
+            if ((b1 >> (7 - c)) & 1) {
+                y_plane[py * w + px] = text_y;
+                int uy = py >> 1;
+                int ux = px & ~1;
+                uv_plane[uy * w + ux]     = text_u;
+                uv_plane[uy * w + ux + 1] = text_v;
+            }
+        }
+        for (int c = 0; c < 8; ++c) {
+            int px = x + 8 + c;
+            if (px < 0 || px >= w) continue;
+
+            if ((b2 >> (7 - c)) & 1) {
+                y_plane[py * w + px] = text_y;
+                int uy = py >> 1;
+                int ux = px & ~1;
+                uv_plane[uy * w + ux]     = text_u;
+                uv_plane[uy * w + ux + 1] = text_v;
+            }
+        }
+    }
+}
+
+void EncodeThread::draw_string_nv12(uint8_t* nv12, int w, int h,
+                                     int x, int y, const std::string& str,
+                                     uint8_t text_y, uint8_t text_u, uint8_t text_v) {
+    int cur_x = x;
+    size_t i = 0;
+    while (i < str.length()) {
+        unsigned char c = str[i];
+        if ((c & 0x80) == 0) {
+            draw_char_nv12(nv12, w, h, cur_x, y, c, text_y, text_u, text_v);
+            cur_x += 8;
+            i += 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            i += 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            if (i + 2 < str.length()) {
+                std::string chinese_char = str.substr(i, 3);
+                draw_chinese_char_nv12(nv12, w, h, cur_x, y, chinese_char, text_y, text_u, text_v);
+                cur_x += 16;
+            }
+            i += 3;
+        } else if ((c & 0xF0) == 0xF0) {
+            i += 4;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+static int get_string_display_width(const std::string& str) {
+    int w = 0;
+    size_t i = 0;
+    while (i < str.length()) {
+        unsigned char c = str[i];
+        if ((c & 0x80) == 0) {
+            w += 8;
+            i += 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            i += 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            w += 16;
+            i += 3;
+        } else if ((c & 0xF0) == 0xF0) {
+            i += 4;
+        } else {
+            i += 1;
+        }
+    }
+    return w;
+}
+
+void EncodeThread::draw_detection_label_nv12(uint8_t* nv12, int w, int h,
+                                              int x1, int y1, int x2, int y2,
+                                              const std::string& label_str) {
+    int text_w = get_string_display_width(label_str);
+    int text_h = 16;
+
+    int pad_x = 2;
+    int pad_y = 2;
+    int strip_w = text_w + pad_x * 2;
+    int strip_h = text_h + pad_y * 2;
+
+    int strip_x1 = x1;
+    int strip_x2 = x1 + strip_w - 1;
+    int strip_y1, strip_y2;
+
+    if (y1 - strip_h >= 0) {
+        strip_y1 = y1 - strip_h;
+        strip_y2 = y1 - 1;
+    } else {
+        strip_y1 = y1;
+        strip_y2 = y1 + strip_h - 1;
+    }
+
+    if (strip_x2 >= w) {
+        strip_x1 = w - strip_w;
+        strip_x2 = w - 1;
+    }
+    if (strip_x1 < 0) {
+        strip_x1 = 0;
+        strip_x2 = std::min(w, strip_w) - 1;
+    }
+
+    constexpr uint8_t BG_Y = 16, BG_U = 128, BG_V = 128;
+    constexpr uint8_t TXT_Y = 235, TXT_U = 128, TXT_V = 128;
+
+    draw_solid_rect_nv12(nv12, w, h, strip_x1, strip_y1, strip_x2, strip_y2, BG_Y, BG_U, BG_V);
+
+    int text_x = strip_x1 + pad_x;
+    int text_y = strip_y1 + pad_y;
+    draw_string_nv12(nv12, w, h, text_x, text_y, label_str, TXT_Y, TXT_U, TXT_V);
+}
+
 // 编码线程主循环，start() 起的线程跑的就是这个函数，running_ 为 false 时退出。
 // 每轮流程：
 //   1) 从 in_queue_ 阻塞取一帧（200ms超时，超时则continue重新检查running_）。
@@ -232,6 +447,19 @@ void EncodeThread::run() {
                            static_cast<int>(det.x1), static_cast<int>(det.y1),
                            static_cast<int>(det.x2), static_cast<int>(det.y2),
                            2, BOX_Y, BOX_U, BOX_V);
+
+            if (cfg_.draw_detection_labels) {
+                int confidence_pct = static_cast<int>(det.score * 100.0f);
+                if (confidence_pct < 0) confidence_pct = 0;
+                if (confidence_pct > 100) confidence_pct = 100;
+                std::string label_str =
+                    get_display_label(det.label) + " " + std::to_string(confidence_pct) + "%";
+
+                draw_detection_label_nv12(drm_ptr, w, h,
+                                          static_cast<int>(det.x1), static_cast<int>(det.y1),
+                                          static_cast<int>(det.x2), static_cast<int>(det.y2),
+                                          label_str);
+            }
         }
 
         MppFrame mpp_frame = nullptr;

@@ -15,6 +15,7 @@ struct EncodeConfig {
     int height;
     int fps;
     int bitrate_kbps = 2000;  // CBR目标码率；RTMP直播推流要稳定带宽，不用VBR换画质
+    bool draw_detection_labels = true;
 };
 
 // 编码线程：取帧 → YUYV直转NV12 → 叠最新检测框 → MPP硬编码H.264 → 写EncodedPacket队列。
@@ -46,6 +47,21 @@ private:
     static void draw_rect_nv12(uint8_t* nv12, int w, int h,
                                 int x1, int y1, int x2, int y2, int thickness,
                                 uint8_t yv, uint8_t uv, uint8_t vv);
+    static void draw_solid_rect_nv12(uint8_t* nv12, int w, int h,
+                                     int x1, int y1, int x2, int y2,
+                                     uint8_t yv, uint8_t uv, uint8_t vv);
+    static void draw_char_nv12(uint8_t* nv12, int w, int h,
+                               int x, int y, char ch,
+                               uint8_t text_y, uint8_t text_u, uint8_t text_v);
+    static void draw_chinese_char_nv12(uint8_t* nv12, int w, int h,
+                                       int x, int y, const std::string& chinese_char,
+                                       uint8_t text_y, uint8_t text_u, uint8_t text_v);
+    static void draw_string_nv12(uint8_t* nv12, int w, int h,
+                                 int x, int y, const std::string& str,
+                                 uint8_t text_y, uint8_t text_u, uint8_t text_v);
+    static void draw_detection_label_nv12(uint8_t* nv12, int w, int h,
+                                          int x1, int y1, int x2, int y2,
+                                          const std::string& label_str);
 
     EncodeConfig                  cfg_;
     BlockingQueue<Frame>&         in_queue_;

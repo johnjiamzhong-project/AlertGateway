@@ -45,6 +45,7 @@ set(SOURCES
     src/main.cpp
     src/capture/CaptureThread.cpp
     src/infer/InferThread.cpp
+    src/infer/RockchipYoloPostprocess.cpp
     src/infer/YoloPostprocess.cpp
     src/encode/EncodeThread.cpp
     src/stream/StreamThread.cpp
@@ -73,3 +74,42 @@ target_link_libraries(AlertGateway PRIVATE
 # --allow-shlib-undefined: FFmpeg/Paho transitive deps (libssl, libva, libx264, etc.)
 # are present on the board but not in the cross-compile sysroot.
 target_link_options(AlertGateway PRIVATE -Wl,--allow-shlib-undefined)
+
+# Standalone RKNN microbenchmark used for controlled model comparisons.
+# Disabled by default so the production build remains unchanged.
+option(BUILD_RKNN_BENCHMARK "Build the standalone RKNN benchmark" OFF)
+if(BUILD_RKNN_BENCHMARK)
+    add_executable(rknn_benchmark
+        tools/benchmark/rknn_benchmark.cpp
+        src/infer/RockchipYoloPostprocess.cpp
+        src/infer/YoloPostprocess.cpp
+    )
+    target_include_directories(rknn_benchmark PRIVATE
+        ${TP}/rknn/include
+        ${CMAKE_SOURCE_DIR}/src
+    )
+    target_link_libraries(rknn_benchmark PRIVATE ${RKNN_STUB} pthread)
+endif()
+
+# Camera + production InferThread smoke test without RTMP/MQTT dependencies.
+option(BUILD_INFER_CAMERA_SMOKE "Build the camera inference smoke test" OFF)
+if(BUILD_INFER_CAMERA_SMOKE)
+    add_executable(infer_camera_smoke
+        tools/benchmark/infer_camera_smoke.cpp
+        src/capture/CaptureThread.cpp
+        src/infer/InferThread.cpp
+        src/infer/RockchipYoloPostprocess.cpp
+        src/infer/YoloPostprocess.cpp
+    )
+    target_include_directories(infer_camera_smoke PRIVATE
+        ${TP}/rknn/include
+        ${TP}/rga/include
+        ${TP}
+        ${CMAKE_SOURCE_DIR}/src
+    )
+    target_link_libraries(infer_camera_smoke PRIVATE
+        ${RKNN_STUB}
+        ${RGA_LIB}
+        pthread
+    )
+endif()

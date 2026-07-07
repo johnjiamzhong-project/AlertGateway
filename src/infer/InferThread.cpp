@@ -24,19 +24,25 @@ InferThread::~InferThread() { stop(); }
 
 // 由 main 在搭好 Capture/Mqtt/Encode 之后调用一次：
 // 1) load_model() 加载 .rknn 并准备好 NPU 上下文，失败则直接抛异常（main 捕获后退出）；
-// 2) 用 cfg_ 里的阈值/目标类别构造 YoloPostprocess（model_input_size 固定 640，
-//    要跟 load_model()/run() 里假定的模型输入尺寸保持一致）；
+// 2) 按model.output_layout构造双输出或Rockchip九输出后处理器；
 // 3) 初始化上报时间戳、置 running_=true，再起 run() 所在的工作线程。
 // 线程起来之后 start() 立即返回，不等待第一帧推理完成。
 void InferThread::start() {
-    if (!load_model()) throw std::runtime_error("InferThread: failed to load " + cfg_.path);
-
     YoloConfig yolo_cfg;
     yolo_cfg.conf_threshold   = cfg_.conf_threshold;
     yolo_cfg.iou_threshold    = cfg_.iou_threshold;
     yolo_cfg.target_classes   = cfg_.target_classes;
     yolo_cfg.model_input_size = 640;
-    postprocess_ = std::make_unique<YoloPostprocess>(yolo_cfg);
+    if (cfg_.output_layout == "decoded") {
+        decoded_postprocess_ = std::make_unique<YoloPostprocess>(yolo_cfg);
+    } else if (cfg_.output_layout == "rockchip_dfl") {
+        rockchip_postprocess_ = std::make_unique<RockchipYoloPostprocess>(yolo_cfg);
+    } else {
+        throw std::runtime_error(
+            "InferThread: unsupported model.output_layout: " + cfg_.output_layout);
+    }
+
+    if (!load_model()) throw std::runtime_error("InferThread: failed to load " + cfg_.path);
 
     last_report_time_ = std::chrono::steady_clock::now();
     running_ = true;
@@ -57,8 +63,8 @@ void InferThread::stop() {
 
 // 把 cfg_.path 指向的 .rknn 文件读进内存，初始化 RKNN 运行时，并完成三件事：
 // (a) 开 SRAM + 绑定三个 NPU 核心提升吞吐；
-// (b) 查询模型输出张量布局，确定 box 坐标和 class 概率分别是第几个输出
-//     （按元素个数区分，不能假设导出顺序，见 box_output_idx_/cls_output_idx_ 的注释）；
+// (b) 查询并校验模型输出张量布局：decoded模式识别box/class，rockchip_dfl模式
+//     校验三组DFL/class/score-sum共九个输出；
 // (c) 预分配 zero-copy 输入用的 NPU DMA 内存并绑定，后续 run() 直接 memcpy 进去，
 //     省掉 rknn_inputs_set 那次额外拷贝。
 // 任意一步出错就打印日志并返回 false，调用方 start() 会因此抛异常终止启动。
@@ -87,28 +93,70 @@ bool InferThread::load_model() {
     if (rknn_query(ctx_, RKNN_QUERY_SDK_VERSION, &sdk_ver, sizeof(sdk_ver)) == RKNN_SUCC)
         std::cout << "RKNN API: " << sdk_ver.api_version << "  Driver: " << sdk_ver.drv_version << "\n" << std::flush;
 
-    rknn_input_output_num io_num;
-    rknn_query(ctx_, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num));
+    rknn_input_output_num io_num{};
+    ret = rknn_query(ctx_, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num));
+    if (ret != RKNN_SUCC || io_num.n_input != 1) {
+        std::cerr << "RKNN_QUERY_IN_OUT_NUM failed or input count is not 1\n";
+        return false;
+    }
     n_output_ = io_num.n_output;
 
-    // 模型有两个输出（box坐标、class概率）：导出时把最后的concat拆开，
-    // 让两者各自拥有独立的量化scale。这里按元素个数而不是假设固定顺序来识别哪个index是哪个。
+    rknn_tensor_attr input_attr{};
+    input_attr.index = 0;
+    ret = rknn_query(ctx_, RKNN_QUERY_INPUT_ATTR, &input_attr, sizeof(input_attr));
+    if (ret != RKNN_SUCC || input_attr.n_dims != 4 ||
+        input_attr.fmt != RKNN_TENSOR_NHWC) {
+        std::cerr << "Invalid model input tensor\n";
+        return false;
+    }
+    model_height_ = static_cast<int>(input_attr.dims[1]);
+    model_width_ = static_cast<int>(input_attr.dims[2]);
+    if (model_width_ != 640 || model_height_ != 640) {
+        std::cerr << "Unsupported model input size: " << model_width_
+                  << "x" << model_height_ << " (expected 640x640)\n";
+        return false;
+    }
+
+    output_attrs_.resize(n_output_);
     for (int i = 0; i < n_output_; i++) {
-        rknn_tensor_attr attr;
+        auto& attr = output_attrs_[i];
         memset(&attr, 0, sizeof(attr));
         attr.index = i;
-        rknn_query(ctx_, RKNN_QUERY_OUTPUT_ATTR, &attr, sizeof(attr));
-        if (attr.n_elems == 4 * 8400) box_output_idx_ = i;
-        else if (attr.n_elems == 80 * 8400) cls_output_idx_ = i;
+        ret = rknn_query(ctx_, RKNN_QUERY_OUTPUT_ATTR, &attr, sizeof(attr));
+        if (ret != RKNN_SUCC) {
+            std::cerr << "RKNN_QUERY_OUTPUT_ATTR failed for output " << i << "\n";
+            return false;
+        }
     }
-    std::cout << "Output index: box=" << box_output_idx_ << " cls=" << cls_output_idx_ << "\n" << std::flush;
+
+    if (cfg_.output_layout == "decoded") {
+        if (n_output_ != 2) {
+            std::cerr << "decoded layout requires 2 outputs, got " << n_output_ << "\n";
+            return false;
+        }
+        for (int i = 0; i < n_output_; ++i) {
+            const auto& attr = output_attrs_[i];
+            if (attr.n_elems == 4 * 8400) box_output_idx_ = i;
+            else if (attr.n_elems == 80 * 8400) cls_output_idx_ = i;
+        }
+        if (box_output_idx_ < 0 || cls_output_idx_ < 0) {
+            std::cerr << "decoded layout box/class outputs not found\n";
+            return false;
+        }
+        std::cout << "Model output layout=decoded box=" << box_output_idx_
+                  << " cls=" << cls_output_idx_ << "\n" << std::flush;
+    } else {
+        std::string validation_error;
+        if (!rockchip_postprocess_->validate(
+                output_attrs_, model_width_, model_height_, &validation_error)) {
+            std::cerr << "Invalid rockchip_dfl outputs: " << validation_error << "\n";
+            return false;
+        }
+        std::cout << "Model output layout=rockchip_dfl outputs=" << n_output_
+                  << "\n" << std::flush;
+    }
 
     // ── Zero-copy 输入设置 ──────────────────────────────────────────────
-    rknn_tensor_attr input_attr;
-    memset(&input_attr, 0, sizeof(input_attr));
-    input_attr.index = 0;
-    rknn_query(ctx_, RKNN_QUERY_INPUT_ATTR, &input_attr, sizeof(input_attr));
-
     uint32_t inp_size = input_attr.size_with_stride > 0 ? input_attr.size_with_stride : input_attr.size;
     input_mem_ = rknn_create_mem(ctx_, inp_size);
     if (!input_mem_) { std::cerr << "rknn_create_mem(input) failed\n"; return false; }
@@ -192,11 +240,7 @@ static bool rga_yuyv_to_rgb_resize(const uint8_t* src, int sw, int sh,
     return true;
 }
 
-// 把一帧的检测结果聚合成 MQTT 上报用的摘要：按 label 分组，统计每类出现次数和
-// 该类里的最高置信度，输出形如 {"timestamp":..,"objects":[{"label","count","score"},...]}
-// 的 JSON 字符串。这里只做聚合不做节流/去重，节流（report_interval_sec）和
-// 去重（跟 last_summary_ 比较）是 run() 调用它之后才做的事。
-std::string InferThread::summarize(const std::vector<Detection>& dets) {
+static json summarize_objects(const std::vector<Detection>& dets) {
     std::map<std::string, std::pair<int, float>> tally;
     for (const auto& d : dets) {
         auto& entry = tally[d.label];
@@ -211,10 +255,23 @@ std::string InferThread::summarize(const std::vector<Detection>& dets) {
             {"score", std::round(cv.second * 100.0f) / 100.0f}
         });
     }
+    return objects;
+}
+
+// 把一帧的检测结果聚合成 MQTT 上报用的摘要：按 label 分组，统计每类出现次数和
+// 该类里的最高置信度，输出形如 {"timestamp":..,"objects":[{"label","count","score"},...]}
+// 的 JSON 字符串。这里只做聚合不做节流/去重，节流（report_interval_sec）和
+// 去重（跟 summary_key() 比较）是 run() 调用它之后才做的事。
+std::string InferThread::summarize(const std::vector<Detection>& dets) {
     json msg;
     msg["timestamp"] = static_cast<int64_t>(std::time(nullptr));
-    msg["objects"]   = objects;
+    msg["objects"]   = summarize_objects(dets);
     return msg.dump();
+}
+
+// 生成不含 timestamp 的内容签名，避免仅因上报时间变化而重复推送 MQTT。
+std::string InferThread::summary_key(const std::vector<Detection>& dets) {
+    return summarize_objects(dets).dump();
 }
 
 // 推理线程主循环，start() 起的线程跑的就是这个函数，running_ 为 false 时退出。
@@ -224,17 +281,15 @@ std::string InferThread::summarize(const std::vector<Detection>& dets) {
 //   2) 按 infer_every_n_frames 跳帧：不是该推理的帧只往下走第4步的MQTT节流逻辑，
 //      不做NPU推理（省算力，沿用上一次的 last_detections 上报）。
 //   3) 真正推理的帧：YUYV422→RGB888+缩放到模型输入尺寸（优先走RGA硬件，失败回退CPU），
-//      memcpy进zero-copy输入buf，rknn_run()跑NPU，取box/cls两路浮点输出交给
-//      YoloPostprocess解码成Detection列表，写入shared_dets_供EncodeThread叠框，
+//      memcpy进zero-copy输入buf，rknn_run()跑NPU，按配置获取双路浮点输出或九路
+//      raw INT8输出并解码成Detection列表，写入shared_dets_供EncodeThread叠框，
 //      并打印各阶段耗时方便定位瓶颈。
-//   4) MQTT上报：按 report_interval_sec 节流，且内容跟 last_summary_ 相同时不重复推送。
+//   4) MQTT上报：按 report_interval_sec 节流，且内容签名相同时不重复推送。
 void InferThread::run() {
-    constexpr int MODEL_W = 640, MODEL_H = 640;
-
     //step 就是"每隔多少帧做一次真正的 NPU 推理"，用来给推理降频。
     const int step = std::max(1, cfg_.infer_every_n_frames);
     std::vector<uint8_t> rgb_buf;
-    std::vector<uint8_t> input_buf(MODEL_W * MODEL_H * 3);
+    std::vector<uint8_t> input_buf(model_width_ * model_height_ * 3);
     std::vector<Detection> last_detections;
     int frame_idx = 0;
     int rga_fail_count = 0;
@@ -257,12 +312,12 @@ void InferThread::run() {
             // YUYV→RGB888 + 缩放（推理专用，编码路径已不再使用此 buf）。
             // RGA 硬件优先，失败时回退到 CPU 路径。
             bool rga_ok = rga_yuyv_to_rgb_resize(frame.raw_data.data(), frame.width, frame.height,
-                                                  input_buf.data(), MODEL_W, MODEL_H);
+                                                  input_buf.data(), model_width_, model_height_);
             if (!rga_ok) {
                 rgb_buf.resize(frame.width * frame.height * 3);
                 yuyv_to_rgb(frame.raw_data.data(), rgb_buf.data(), frame.width, frame.height);
                 resize_rgb(rgb_buf.data(), frame.width, frame.height,
-                           input_buf.data(), MODEL_W, MODEL_H);
+                           input_buf.data(), model_width_, model_height_);
                 if (++rga_fail_count % 30 == 1) {
                     std::cerr << "[Infer] RGA path failed, using CPU fallback ("
                               << rga_fail_count << " times)\n" << std::flush;
@@ -271,30 +326,46 @@ void InferThread::run() {
             auto t1 = clk::now();
 
             // Zero-copy：直接 memcpy 进 NPU 的 DMA 输入缓冲区
-            memcpy(input_mem_->virt_addr, input_buf.data(), MODEL_W * MODEL_H * 3);
+            memcpy(input_mem_->virt_addr, input_buf.data(), input_buf.size());
             auto t2 = clk::now();
 
-            rknn_run(ctx_, nullptr);
+            int run_ret = rknn_run(ctx_, nullptr);
             auto t3 = clk::now();
 
-            // 用标准浮点输出：交给 RKNN driver 内部做反量化。
-            // box 和 cls 是各自独立量化scale的两路输出——如果共用一个scale，
-            // box像素坐标(0-640)和class概率(0-1)量级差太大，会把class精度冲掉（详见 BUGS.md）。
-            constexpr int N_ANCHORS = 8400;
-            // 1. 准备接收结果的结构体
-            rknn_output outputs[2];
-            memset(outputs, 0, sizeof(outputs));
-            outputs[box_output_idx_].want_float = 1;
-            outputs[cls_output_idx_].want_float = 1;
-            // 2. 真正去拿结果
-            if (rknn_outputs_get(ctx_, n_output_, outputs, nullptr) == RKNN_SUCC) {
-                // 3. 取出指针，转成float*
-                const float* box = static_cast<const float*>(outputs[box_output_idx_].buf);
-                const float* cls = static_cast<const float*>(outputs[cls_output_idx_].buf);
-                //4. 交给后处理，再释放这块NPU内存
-                last_detections = postprocess_->process(box, cls, N_ANCHORS,
-                                                          frame.width, frame.height);
-                rknn_outputs_release(ctx_, n_output_, outputs);
+            if (run_ret == RKNN_SUCC) {
+                std::vector<rknn_output> outputs(static_cast<size_t>(n_output_));
+                for (int i = 0; i < n_output_; ++i) {
+                    outputs[i].index = i;
+                    outputs[i].want_float = cfg_.output_layout == "decoded";
+                    outputs[i].is_prealloc = 0;
+                }
+                int get_ret =
+                    rknn_outputs_get(ctx_, n_output_, outputs.data(), nullptr);
+                if (get_ret == RKNN_SUCC) {
+                    if (cfg_.output_layout == "decoded") {
+                        constexpr int N_ANCHORS = 8400;
+                        const float* box = static_cast<const float*>(
+                            outputs[box_output_idx_].buf);
+                        const float* cls = static_cast<const float*>(
+                            outputs[cls_output_idx_].buf);
+                        last_detections = decoded_postprocess_->process(
+                            box, cls, N_ANCHORS, frame.width, frame.height);
+                    } else {
+                        last_detections = rockchip_postprocess_->process(
+                            outputs, output_attrs_, model_width_, model_height_,
+                            frame.width, frame.height);
+                    }
+                    int release_ret =
+                        rknn_outputs_release(ctx_, n_output_, outputs.data());
+                    if (release_ret != RKNN_SUCC)
+                        std::cerr << "[Infer] rknn_outputs_release failed: "
+                                  << release_ret << "\n";
+                } else {
+                    std::cerr << "[Infer] rknn_outputs_get failed: "
+                              << get_ret << "\n";
+                }
+            } else {
+                std::cerr << "[Infer] rknn_run failed: " << run_ret << "\n";
             }
             auto t4 = clk::now();
 
@@ -312,10 +383,10 @@ void InferThread::run() {
         if (std::chrono::duration_cast<std::chrono::seconds>(
                 now - last_report_time_).count() >= det_cfg_.report_interval_sec) {
             last_report_time_ = now;
-            std::string summary = summarize(last_detections);
-            if (summary != last_summary_) {
-                last_summary_ = summary;
-                mqtt_queue_.push(summary, 100);
+            std::string key = summary_key(last_detections);
+            if (key != last_summary_key_) {
+                last_summary_key_ = key;
+                mqtt_queue_.push(summarize(last_detections), 100);
             }
         }
     }

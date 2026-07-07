@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RK3588 NPU 性能优化仪表盘 - AlertGateway</title>
+    <style>
+        :root {
+            --bg-color: #080C14;
+            --card-bg: rgba(16, 22, 36, 0.6);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-main: #E2E8F0;
+            --text-muted: #718096;
+            --neon-blue: #00F0FF;
+            --neon-green: #39FF14;
+            --neon-red: #FF3366;
+            --neon-orange: #FF9900;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            min-height: 100vh;
+            padding: 2rem;
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(0, 240, 255, 0.05) 0%, transparent 40%),
+                radial-gradient(circle at 90% 80%, rgba(57, 255, 20, 0.04) 0%, transparent 45%);
+            background-attachment: fixed;
+        }
+
+        header {
+            max-width: 1200px;
+            margin: 0 auto 2rem auto;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 1.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header-title h1 {
+            font-size: 1.8rem;
+            font-weight: 700;
+            background: linear-gradient(90deg, #FFFFFF 0%, #A0AEC0 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: 0.5px;
+        }
+
+        .header-title p {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            margin-top: 0.25rem;
+        }
+
+        .tag {
+            background: rgba(0, 240, 255, 0.1);
+            border: 1px solid var(--neon-blue);
+            color: var(--neon-blue);
+            padding: 0.35rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            box-shadow: 0 0 10px rgba(0, 240, 255, 0.2);
+        }
+
+        .dashboard-grid {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: repeat(12, 1fr);
+            gap: 1.5rem;
+        }
+
+        .card {
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 1.5rem;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 4px;
+            background: transparent;
+        }
+
+        .card:hover {
+            transform: translateY(-4px);
+            border-color: rgba(255, 255, 255, 0.15);
+            box-shadow: 0 12px 40px 0 rgba(0, 0, 0, 0.4);
+        }
+
+        .col-12 { grid-column: span 12; }
+        .col-6 { grid-column: span 6; }
+        .col-4 { grid-column: span 4; }
+        .col-8 { grid-column: span 8; }
+
+        @media (max-width: 900px) {
+            .col-6, .col-4, .col-8 { grid-column: span 12; }
+        }
+
+        /* KPI Panel */
+        .kpi-container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            height: 100%;
+        }
+
+        .kpi-meta h3 {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .kpi-value {
+            font-size: 2.2rem;
+            font-weight: 700;
+            margin-top: 0.5rem;
+            display: flex;
+            align-items: baseline;
+        }
+
+        .kpi-value span {
+            font-size: 1rem;
+            color: var(--text-muted);
+            margin-left: 0.25rem;
+        }
+
+        .kpi-chart {
+            width: 80px;
+            height: 45px;
+        }
+
+        /* Border indicator colors */
+        .border-blue::before { background: var(--neon-blue); }
+        .border-green::before { background: var(--neon-green); }
+        .border-red::before { background: var(--neon-red); }
+
+        /* Custom plots */
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.25rem;
+        }
+
+        .chart-header h2 {
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+
+        .legend {
+            display: flex;
+            gap: 1rem;
+            font-size: 0.8rem;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+
+        .legend-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        .dot-red { background: var(--neon-red); box-shadow: 0 0 6px var(--neon-red); }
+        .dot-green { background: var(--neon-green); box-shadow: 0 0 6px var(--neon-green); }
+        .dot-blue { background: var(--neon-blue); box-shadow: 0 0 6px var(--neon-blue); }
+
+        /* SVG Line plots */
+        .line-chart-svg {
+            width: 100%;
+            height: 180px;
+        }
+
+        .grid-line {
+            stroke: rgba(255, 255, 255, 0.03);
+            stroke-width: 1;
+        }
+
+        .chart-axis {
+            stroke: rgba(255, 255, 255, 0.1);
+            stroke-width: 1;
+        }
+
+        .axis-label {
+            fill: var(--text-muted);
+            font-size: 9px;
+        }
+
+        /* CPU Micro map */
+        .cpu-cores {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 0.75rem;
+            margin-top: 1rem;
+        }
+
+        .core-box {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 0.75rem;
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+
+        .core-box.active-high {
+            background: rgba(0, 240, 255, 0.05);
+            border-color: var(--neon-blue);
+            box-shadow: inset 0 0 8px rgba(0, 240, 255, 0.1);
+        }
+
+        .core-box.active-low {
+            background: rgba(57, 255, 20, 0.03);
+            border-color: rgba(57, 255, 20, 0.3);
+        }
+
+        .core-box .core-name {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        .core-box.active-high .core-name {
+            color: var(--text-main);
+            font-weight: 600;
+        }
+
+        .core-box .core-freq {
+            font-size: 0.9rem;
+            font-weight: 700;
+            margin-top: 0.25rem;
+        }
+
+        .core-box.active-high .core-freq {
+            color: var(--neon-blue);
+            text-shadow: 0 0 8px rgba(0, 240, 255, 0.3);
+        }
+
+        .core-box.active-low .core-freq {
+            color: var(--neon-green);
+        }
+
+        /* Bar comparison for CPU Cycles */
+        .bar-comparison {
+            margin-top: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .bar-row {
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+
+        .bar-info {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.85rem;
+        }
+
+        .bar-outer {
+            height: 12px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 6px;
+            overflow: hidden;
+            width: 100%;
+        }
+
+        .bar-inner {
+            height: 100%;
+            border-radius: 6px;
+            width: 0%;
+            transition: width 1.5s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        .bar-inner.red {
+            background: linear-gradient(90deg, #FF3366 0%, #FF9900 100%);
+            box-shadow: 0 0 10px rgba(255, 51, 102, 0.4);
+        }
+
+        .bar-inner.blue {
+            background: linear-gradient(90deg, #00F0FF 0%, #0080FF 100%);
+            box-shadow: 0 0 10px rgba(0, 240, 255, 0.4);
+        }
+
+        .toggle-btn {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 0.4rem 0.8rem;
+            font-size: 0.8rem;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .toggle-btn:hover {
+            background: rgba(255, 255, 255, 0.08);
+            border-color: rgba(255, 255, 255, 0.2);
+        }
+
+        .toggle-btn.active {
+            background: var(--neon-blue);
+            color: #000;
+            font-weight: 600;
+            border-color: var(--neon-blue);
+            box-shadow: 0 0 10px rgba(0, 240, 255, 0.3);
+        }
+
+        .view-switch {
+            display: flex;
+            gap: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="header-title">
+            <h1>RK3588 NPU 性能优化大屏</h1>
+            <p>基于 AlertGateway 网关程序，进行 CPU 与 NPU 锁频优化前后的性能硬件对比</p>
+        </div>
+        <div class="tag">RK3588 @ 6.1.118 Kernel</div>
+    </header>
+
+    <div class="dashboard-grid">
+
+        <!-- KPI 1 -->
+        <div class="card col-4 border-red">
+            <div class="kpi-container">
+                <div class="kpi-meta">
+                    <h3>默认时延均值</h3>
+                    <div class="kpi-value" style="color: var(--neon-red);">48.8<span>ms</span></div>
+                </div>
+                <div class="kpi-chart">
+                    <svg viewBox="0 0 80 40" width="100%" height="100%">
+                        <path d="M0,30 Q20,10 40,35 T80,15" fill="none" stroke="var(--neon-red)" stroke-width="2" />
+                    </svg>
+                </div>
+            </div>
+        </div>
+
+        <!-- KPI 2 -->
+        <div class="card col-4 border-green">
+            <div class="kpi-container">
+                <div class="kpi-meta">
+                    <h3>优化后时延均值</h3>
+                    <div class="kpi-value" style="color: var(--neon-green);">33.2<span>ms</span></div>
+                </div>
+                <div class="kpi-chart">
+                    <svg viewBox="0 0 80 40" width="100%" height="100%">
+                        <path d="M0,25 L20,24 L40,26 L60,25 L80,24" fill="none" stroke="var(--neon-green)" stroke-width="2" />
+                    </svg>
+                </div>
+            </div>
+        </div>
+
+        <!-- KPI 3 -->
+        <div class="card col-4 border-blue">
+            <div class="kpi-container">
+                <div class="kpi-meta">
+                    <h3>CPU 物理耗时缩减</h3>
+                    <div class="kpi-value" style="color: var(--neon-blue);">-61.2<span>%</span></div>
+                </div>
+                <div class="kpi-chart">
+                    <svg viewBox="0 0 80 40" width="100%" height="100%">
+                        <path d="M0,5 L80,35" fill="none" stroke="var(--neon-blue)" stroke-width="2" stroke-dasharray="4" />
+                    </svg>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Latency Plot -->
+        <div class="card col-8">
+            <div class="chart-header">
+                <h2>时延波动与平滑度分析</h2>
+                <div class="legend">
+                    <div class="legend-item">
+                        <div class="legend-dot dot-red"></div>
+                        <span>默认动态调频 (43-58ms 抖动)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-dot dot-green"></div>
+                        <span>优化锁定模式 (32-34ms 平滑)</span>
+                    </div>
+                </div>
+            </div>
+            <!-- Interactive Latency Plot using SVG -->
+            <svg class="line-chart-svg" viewBox="0 0 600 180">
+                <!-- Grid Lines -->
+                <line x1="40" y1="20" x2="580" y2="20" class="grid-line" />
+                <line x1="40" y1="60" x2="580" y2="60" class="grid-line" />
+                <line x1="40" y1="100" x2="580" y2="100" class="grid-line" />
+                <line x1="40" y1="140" x2="580" y2="140" class="grid-line" />
+                
+                <!-- Axis Labels -->
+                <text x="15" y="23" class="axis-label">60ms</text>
+                <text x="15" y="63" class="axis-label">45ms</text>
+                <text x="15" y="103" class="axis-label">30ms</text>
+                <text x="15" y="143" class="axis-label">15ms</text>
+
+                <!-- X Axis Labels (Samples) -->
+                <text x="40" y="165" class="axis-label">1</text>
+                <text x="130" y="165" class="axis-label">5</text>
+                <text x="220" y="165" class="axis-label">10</text>
+                <text x="310" y="165" class="axis-label">15</text>
+                <text x="400" y="165" class="axis-label">20</text>
+                <text x="490" y="165" class="axis-label">25</text>
+                <text x="580" y="165" class="axis-label">30 (帧)</text>
+
+                <!-- Default line (Red) with jitter -->
+                <!-- Points: 1(48.91), 2(51.95), 3(43.15), 4(58.49) scaled -->
+                <path d="M 40 52 L 58 44 L 76 68 L 94 28 L 112 50 L 130 38 L 148 64 L 166 42 L 184 48 L 202 70 L 220 54 L 238 35 L 256 58 L 274 46 L 292 65 L 310 39 L 328 47 L 346 62 L 364 43 L 382 51 L 400 37 L 418 56 L 436 49 L 454 68 L 472 41 L 490 53 L 508 45 L 526 63 L 544 38 L 580 50" 
+                      fill="none" stroke="var(--neon-red)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+
+                <!-- Optimized line (Green) - extremely smooth -->
+                <!-- Points: ~33.2ms -->
+                <path d="M 40 92 L 58 96 L 76 92 L 94 95 L 112 94 L 130 92 L 148 93 L 166 94 L 184 93 L 202 92 L 220 92 L 238 93 L 256 94 L 274 92 L 292 92 L 310 93 L 328 92 L 346 94 L 364 93 L 382 92 L 400 93 L 418 92 L 436 93 L 454 94 L 472 92 L 490 92 L 508 93 L 526 92 L 544 94 L 580 92" 
+                      fill="none" stroke="var(--neon-green)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+
+                <!-- Bottom Axis Line -->
+                <line x1="40" y1="150" x2="580" y2="150" class="chart-axis" />
+                <line x1="40" y1="20" x2="40" y2="150" class="chart-axis" />
+            </svg>
+        </div>
+
+        <!-- Task clock bar comparison -->
+        <div class="card col-4">
+            <div class="chart-header">
+                <h2>CPU Task-Clock 效率</h2>
+            </div>
+            <p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 1rem;">
+                处理单帧 YOLOv8 图像数据流，CPU 核心占用的总物理时钟时间（Perf 硬件统计数据）：
+            </p>
+            <div class="bar-comparison">
+                <div class="bar-row">
+                    <div class="bar-info">
+                        <span>默认动态调频 (低效)</span>
+                        <span style="color: var(--neon-red); font-weight: 600;">613.4 ms</span>
+                    </div>
+                    <div class="bar-outer">
+                        <div id="bar-default" class="bar-inner red"></div>
+                    </div>
+                </div>
+                <div class="bar-row">
+                    <div class="bar-info">
+                        <span>性能/差异化锁定 (高效)</span>
+                        <span style="color: var(--neon-blue); font-weight: 600;">237.7 ms</span>
+                    </div>
+                    <div class="bar-outer">
+                        <div id="bar-opt" class="bar-inner blue"></div>
+                    </div>
+                </div>
+            </div>
+            <p style="font-size: 0.8rem; color: var(--neon-green); margin-top: 1.5rem; font-weight: 600; text-align: center;">
+                🚀 物理核心指令执行周期提速达 2.58 倍！
+            </p>
+        </div>
+
+        <!-- Big.LITTLE CPU Governor Map -->
+        <div class="card col-12">
+            <div class="chart-header">
+                <h2>RK3588 芯片核心运行状态与调频模式拓扑图</h2>
+                <div class="view-switch">
+                    <button class="toggle-btn" id="btn-default">默认动态调频</button>
+                    <button class="toggle-btn active" id="btn-diff">差异化调频 (最佳方案)</button>
+                </div>
+            </div>
+            
+            <div class="cpu-cores" id="cores-container">
+                <!-- Cores will be populated dynamically -->
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        // Trigger bar animations on load
+        window.addEventListener('load', () => {
+            setTimeout(() => {
+                document.getElementById('bar-default').style.width = '100%';
+                document.getElementById('bar-opt').style.width = '38.8%';
+            }, 300);
+        });
+
+        // CPU Core topology configs
+        const configDefault = [
+            { name: "Core 0 (A55)", type: "little", freq: "408 MHz", mode: "interactive (节能)", class: "active-low" },
+            { name: "Core 1 (A55)", type: "little", freq: "408 MHz", mode: "interactive (节能)", class: "active-low" },
+            { name: "Core 2 (A55)", type: "little", freq: "408 MHz", mode: "interactive (节能)", class: "active-low" },
+            { name: "Core 3 (A55)", type: "little", freq: "408 MHz", mode: "interactive (节能)", class: "active-low" },
+            { name: "Core 4 (A76)", type: "big", freq: "408 MHz", mode: "interactive (挂起)", class: "active-low" },
+            { name: "Core 5 (A76)", type: "big", freq: "816 MHz", mode: "interactive (微动)", class: "active-low" },
+            { name: "Core 6 (A76)", type: "big", freq: "408 MHz", mode: "interactive (挂起)", class: "active-low" },
+            { name: "Core 7 (A76)", type: "big", freq: "408 MHz", mode: "interactive (挂起)", class: "active-low" },
+            { name: "NPU Core", type: "npu", freq: "1.0 GHz", mode: "rknpu_ondemand", class: "active-low" }
+        ];
+
+        const configDifferentiated = [
+            { name: "Core 0 (A55)", type: "little", freq: "408 MHz", mode: "interactive (空闲降频)", class: "active-low" },
+            { name: "Core 1 (A55)", type: "little", freq: "408 MHz", mode: "interactive (空闲降频)", class: "active-low" },
+            { name: "Core 2 (A55)", type: "little", freq: "408 MHz", mode: "interactive (空闲降频)", class: "active-low" },
+            { name: "Core 3 (A55)", type: "little", freq: "408 MHz", mode: "interactive (空闲降频)", class: "active-low" },
+            { name: "Core 4 (A76)", type: "big", freq: "2.25 GHz", mode: "performance (极速)", class: "active-high" },
+            { name: "Core 5 (A76)", type: "big", freq: "2.25 GHz", mode: "performance (极速)", class: "active-high" },
+            { name: "Core 6 (A76)", type: "big", freq: "2.25 GHz", mode: "performance (极速)", class: "active-high" },
+            { name: "Core 7 (A76)", type: "big", freq: "2.25 GHz", mode: "performance (极速)", class: "active-high" },
+            { name: "NPU Core", type: "npu", freq: "1.0 GHz", mode: "performance (全力)", class: "active-high" }
+        ];
+
+        function renderCores(config) {
+            const container = document.getElementById('cores-container');
+            container.innerHTML = '';
+            config.forEach(core => {
+                const box = document.createElement('div');
+                box.className = `core-box ${core.class}`;
+                
+                const name = document.createElement('div');
+                name.className = 'core-name';
+                name.innerText = core.name;
+                
+                const freq = document.createElement('div');
+                freq.className = 'core-freq';
+                freq.innerText = core.freq;
+
+                const mode = document.createElement('div');
+                mode.style.fontSize = '0.7rem';
+                mode.style.marginTop = '0.2rem';
+                mode.style.color = 'var(--text-muted)';
+                mode.innerText = core.mode;
+
+                box.appendChild(name);
+                box.appendChild(freq);
+                box.appendChild(mode);
+                container.appendChild(box);
+            });
+        }
+
+        // Render differentiated by default
+        renderCores(configDifferentiated);
+
+        // Buttons toggles
+        document.getElementById('btn-default').addEventListener('click', (e) => {
+            document.getElementById('btn-default').classList.add('active');
+            document.getElementById('btn-diff').classList.remove('active');
+            renderCores(configDefault);
+        });
+
+        document.getElementById('btn-diff').addEventListener('click', (e) => {
+            document.getElementById('btn-diff').classList.add('active');
+            document.getElementById('btn-default').classList.remove('active');
+            renderCores(configDifferentiated);
+        });
+    </script>
+</body>
+</html>

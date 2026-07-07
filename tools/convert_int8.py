@@ -5,7 +5,10 @@
 
 用法：
     python3 tools/convert_int8.py
+    python3 tools/convert_int8.py --optimization-level 2 \
+        --output ~/exp002/yolov8s_opt2.rknn
 """
+import argparse
 import os
 import glob
 import numpy as np
@@ -22,6 +25,29 @@ STD_VALUES    = [[255, 255, 255]]  # 标准差=255 等价于 /255 归一化
 
 DATASET_TXT   = os.path.expanduser("~/calibration/dataset.txt")
 VERBOSE_LOG   = "/tmp/rknn_convert_verbose.log"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Convert YOLOv8s ONNX to an INT8 RKNN model")
+    parser.add_argument(
+        "--optimization-level",
+        type=int,
+        choices=range(4),
+        default=0,
+        metavar="{0,1,2,3}",
+        help="RKNN graph optimization level (default: 0)",
+    )
+    parser.add_argument(
+        "--output",
+        default=RKNN_MODEL,
+        help=f"output RKNN path (default: {RKNN_MODEL})",
+    )
+    parser.add_argument(
+        "--verbose-log",
+        default=VERBOSE_LOG,
+        help=f"RKNN verbose log path (default: {VERBOSE_LOG})",
+    )
+    return parser.parse_args()
 
 
 def print_non_int8_layers(log_path):
@@ -52,25 +78,38 @@ def make_dataset_txt(calib_dir, txt_path, limit=150):
     paths = sorted(glob.glob(os.path.join(calib_dir, "calib_*.png")))[:limit]
     if not paths:
         raise FileNotFoundError(f"未找到校准图片：{calib_dir}/calib_*.png")
-    with open(txt_path, "w") as f:
-        for p in paths:
-            f.write(p + "\n")
+    contents = "".join(p + "\n" for p in paths)
+    current_contents = None
+    if os.path.exists(txt_path):
+        with open(txt_path) as f:
+            current_contents = f.read()
+    if current_contents != contents:
+        with open(txt_path, "w") as f:
+            f.write(contents)
     print(f"校准数据集：{len(paths)} 张 → {txt_path}")
     return txt_path
 
 
 def main():
-    rknn = RKNN(verbose=True, verbose_file=VERBOSE_LOG)
+    args = parse_args()
+    output_path = os.path.expanduser(args.output)
+    verbose_log = os.path.expanduser(args.verbose_log)
+    output_dir = os.path.dirname(os.path.abspath(output_path))
+    log_dir = os.path.dirname(os.path.abspath(verbose_log))
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
+
+    rknn = RKNN(verbose=True, verbose_file=verbose_log)
 
     # 1. 配置：INT8 量化 + RK3588 平台
-    print(">> 配置模型...")
+    print(f">> 配置模型（optimization_level={args.optimization_level}）...")
     rknn.config(
         mean_values=MEAN_VALUES,
         std_values=STD_VALUES,
         target_platform=PLATFORM,
         quantized_dtype="asymmetric_quantized-8",
         quantized_algorithm="normal",
-        optimization_level=0,
+        optimization_level=args.optimization_level,
     )
 
     # 2. 加载 ONNX 模型
@@ -92,16 +131,16 @@ def main():
         raise RuntimeError(f"build 失败：{ret}")
 
     # 4. 导出 rknn 模型
-    print(f">> 导出模型：{RKNN_MODEL}")
-    ret = rknn.export_rknn(RKNN_MODEL)
+    print(f">> 导出模型：{output_path}")
+    ret = rknn.export_rknn(output_path)
     if ret != 0:
         raise RuntimeError(f"export_rknn 失败：{ret}")
 
     # 检查是否有层 fallback 到 float/fp16
-    print_non_int8_layers(VERBOSE_LOG)
+    print_non_int8_layers(verbose_log)
 
     rknn.release()
-    print(f"\n完成！INT8 模型已保存至：{RKNN_MODEL}")
+    print(f"\n完成！INT8 模型已保存至：{output_path}")
     print("后续：scp 上传到板子，替换 ~/AlertGateway/model/yolov8s.rknn")
 
 

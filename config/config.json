@@ -7,6 +7,7 @@
   },
   "model": {
     "path": "model/yolov8s.rknn",
+    "output_layout": "decoded",
     "conf_threshold": 0.15,
     "iou_threshold": 0.45
   },
@@ -15,7 +16,9 @@
     "report_interval_sec": 1
   },
   "stream": {
-    "rtmp_url": "rtmp://<YOUR_SRS_SERVER_IP>/live/desk"
+    "rtmp_url": "rtmp://<YOUR_SRS_SERVER_IP>/live/desk",
+    "bitrate_kbps": 2000,
+    "draw_detection_labels": true
   },
   "mqtt": {
     "broker": "<YOUR_MQTT_BROKER_IP>",
