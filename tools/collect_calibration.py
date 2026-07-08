@@ -2,8 +2,8 @@
 """
 采集 INT8 量化校准图片，带实时预览。
 
-从 V4L2 摄像头采集画面，缩放为 640×640 RGB 后保存为 PNG。
-尺寸与推理预处理一致（yuyv_to_rgb → resize_rgb 640×640）。
+从 V4L2 摄像头采集画面，缩放为模型输入尺寸 RGB 后保存为 PNG。
+默认尺寸为 640×640，可用 --model-width/--model-height 采集 640×480 等实验尺寸。
 
 操作说明：
     空格键  — 采集当前帧
@@ -13,6 +13,7 @@
 用法：
     python3 tools/collect_calibration.py
     python3 tools/collect_calibration.py --device /dev/video20 --count 150 --out ~/calibration
+    python3 tools/collect_calibration.py --model-width 640 --model-height 480 --out ~/calibration_640x480
 
 显示说明：
     需要桌面环境或 SSH X11 转发（ssh -X firefly@192.168.0.200）
@@ -30,6 +31,8 @@ def parse_args():
     p.add_argument("--out",        default=os.path.expanduser("~/calibration"), help="保存目录")
     p.add_argument("--interval",   type=float, default=0.5,                     help="无预览模式的采集间隔（秒）")
     p.add_argument("--no-preview", action="store_true",                         help="禁用预览，定时自动采集")
+    p.add_argument("--model-width", type=int, default=640,                      help="保存图片宽度/模型输入宽度")
+    p.add_argument("--model-height", type=int, default=640,                     help="保存图片高度/模型输入高度")
     return p.parse_args()
 
 def draw_overlay(frame, saved, total):
@@ -44,7 +47,11 @@ def draw_overlay(frame, saved, total):
 
 def main():
     args = parse_args()
+    if args.model_width <= 0 or args.model_height <= 0:
+        raise ValueError("--model-width 和 --model-height 必须为正整数")
+
     os.makedirs(args.out, exist_ok=True)
+    model_size = (args.model_width, args.model_height)
 
     cap = cv2.VideoCapture(args.device, cv2.CAP_V4L2)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
@@ -60,7 +67,7 @@ def main():
 
     if args.no_preview:
         # ── 无预览：定时自动采集 ──────────────────────────────────────────────
-        print(f"自动采集模式，目标 {args.count} 张，间隔 {args.interval}s")
+        print(f"自动采集模式，目标 {args.count} 张，间隔 {args.interval}s，保存尺寸 {args.model_width}x{args.model_height}")
         print(f"保存路径：{args.out}  |  Ctrl+C 提前结束\n")
         try:
             while saved < args.count:
@@ -68,7 +75,7 @@ def main():
                 if not ret:
                     continue
                 img = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
-                                 (640, 640), interpolation=cv2.INTER_LINEAR)
+                                 model_size, interpolation=cv2.INTER_LINEAR)
                 path = os.path.join(args.out, f"calib_{saved:04d}.png")
                 cv2.imwrite(path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
                 saved += 1
@@ -78,21 +85,21 @@ def main():
             print(f"\n提前结束")
     else:
         # ── 预览模式：手动按空格采集 ─────────────────────────────────────────
-        print(f"预览模式，目标 {args.count} 张")
+        print(f"预览模式，目标 {args.count} 张，保存尺寸 {args.model_width}x{args.model_height}")
         print(f"保存路径：{args.out}")
         print("空格=采集  D=撤销上一张  Q/ESC=退出\n")
 
         cv2.namedWindow("Calibration Preview", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("Calibration Preview", 640, 640)
+        cv2.resizeWindow("Calibration Preview", args.model_width, args.model_height)
 
         while saved < args.count:
             ret, frame = cap.read()
             if not ret:
                 continue
 
-            # 缩放到 640×640（与推理预处理一致）
+            # 缩放到模型输入尺寸（与推理预处理一致）
             img_rgb = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
-                                 (640, 640), interpolation=cv2.INTER_LINEAR)
+                                 model_size, interpolation=cv2.INTER_LINEAR)
             img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
             preview = draw_overlay(img_bgr.copy(), saved, args.count)

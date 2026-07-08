@@ -29,7 +29,7 @@ V4L2摄像头采集
 
 ## 当前已确认状态
 
-- Git分支：`master`，本地已提交 `38902cb`，当前领先 `origin/master` 2 个提交。
+- Git分支：`master`，当前领先 `origin/master` 4 个提交；具体 HEAD 以 `git log -1` 为准。
 - 工作区存在用户自己的未提交修改和未跟踪文档，处理任务时必须保留，不能覆盖或清理。
 - 本地已有ARM64构建产物 `build/AlertGateway`。
 - 仓库内 `model/` 只有 `.gitkeep`；实际运行所需的 `model/yolov8s.rknn` 未纳入Git。
@@ -79,7 +79,40 @@ V4L2摄像头采集
 - 2026-07-08 完成 EXP-005 人工画质评估与 30 帧人工精度核对。黑底中文标签清晰度与遮挡均在极佳状态；2 Mbps 码率细节虽微有蚊噪但完全可接受并节省 33.3% 带宽，推荐作为生产配置。30 帧核对发现戴尔显示屏稳定检出但错检为 laptop，易拉罐全程漏检，棉柔巾纸盒存在低置信度误检，建议设置过滤阈值 conf_threshold >= 0.25。结论允许且推荐进入固定标注集自动评估阶段。
 - 2026-07-08 完成 EXP-006 官方九输出与生产双输出模型精度量化仿真对比。两者整体 mAP 均完全对齐（COCO 子集 60.16%、桌面场景 48.33%），证明精度无任何损失，且九输出在部分类别（cup/laptop）的 Precision 指标上因精细 Softmax 而略微领先。已正式将生产配置 config.json 中的 model.output_layout 从 decoded 切换为 rockchip_dfl。
 - 2026-07-08 完成板端生产配置 Smoke 真机验证。部署新命名的官方九输出模型 ~/AlertGateway/model/yolov8s_rockchip_dfl.rknn，并将 config.json 的 model.output_layout 切换为 rockchip_dfl，conf_threshold 设定为 0.25，stream.bitrate_kbps 设定为 2000。程序在本地 FLV 推流配置下稳定运行 62.533 秒，无任何推理/编码链报错，并在超时后通过 SIGTERM 信号优雅退出（Done），证实了九输出模型固件与生产配置的配置匹配正常。
-- EXP-001至EXP-006详细操作与结果见 `docs/YOLOv8s-RK3588推理优化实验记录.md`。
+- 2026-07-08 已开始 640x480 输入尺寸优化准备：`tools/collect_calibration.py` 支持通过
+  `--model-width/--model-height` 采集不同模型输入尺寸的校准图；`tools/convert_int8.py`
+  支持参数化 ONNX、校准目录、dataset.txt、输出路径和 `decoded/rockchip_dfl` 输出布局；
+  `tools/benchmark/evaluate_precision.py` 支持通过 `--model-width/--model-height` 按模型
+  输入尺寸做 resize、坐标回映射和 rockchip_dfl 输出网格校验，并可通过 `--model-mode`
+  单独评估某一种输出布局。
+- 2026-07-08 完成首个 640x480 九输出候选验证：基于现有 640x640 官方九输出 ONNX 修改
+  静态输入/输出形状生成 `/home/rambos/yolov8s_official_640x480.onnx`，ONNX Runtime
+  验证输出网格为 60x80、30x40、15x20；使用从板端拉回的 150 张 640x480 校准图成功
+  转换 `/home/rambos/yolov8s_rockchip_dfl_640x480.rknn`，大小 12M，转换脚本检查为
+  全 INT8、无 float/fp16 fallback。Simulator 精度评估显示 COCO 子集 mAP 从 60.16%
+  升至 68.15%，但桌面场景 mAP 从 48.33% 严重降至 8.33%，laptop Recall 从 96.67%
+  降至 16.67%。该候选不能进入生产 C++ 尺寸放开和板端 smoke。
+- 2026-07-08 复测原生导出的 640x480 官方九输出 ONNX：
+  `/home/rambos/yolov8s_official_native_640x480.onnx` 由 `ultralytics_yolov8` 定制库
+  `rk_opt_v1.6` 分支导出，文件 hash、权重 initializer 和转换得到的 RKNN hash 均不同于
+  改形候选；转换 `/home/rambos/yolov8s_rockchip_dfl_native_640x480.rknn` 成功，大小
+  12M，转换脚本检查为全 INT8、无 float/fp16 fallback。但 Simulator 精度结果与改形候选
+  完全一致：COCO 子集 mAP 68.15%，桌面场景 mAP 8.33%，laptop Recall 16.67%，cup
+  Recall 0.00%。因此当前所有 640x480 候选均不允许进入生产。
+- 2026-07-08 完成 576x448 与 512x384 输入尺寸候选验证。两个尺寸均由
+  `ultralytics_yolov8` 定制库 `rk_opt_v1.6` 原生导出官方九输出 ONNX，并成功转换为
+  全 INT8 RKNN：`/home/rambos/yolov8s_rockchip_dfl_native_576x448.rknn` 与
+  `/home/rambos/yolov8s_rockchip_dfl_native_512x384.rknn`。Simulator 精度评估显示
+  576x448 的 COCO 子集 mAP 为 61.39%，但桌面场景 mAP 仅 13.33%，laptop Recall
+  26.67%；512x384 的 COCO 子集 mAP 为 53.61%，桌面场景 mAP 仅 5.00%，laptop
+  Recall 10.00%。两者均低于 640x640 `rockchip_dfl` 桌面基线 48.33%/96.67%，不能
+  进入生产。
+- 2026-07-08 已整理输入尺寸实验收尾：根目录临时 `check*.onnx` 中间模型移出仓库到
+  `/tmp/alertgateway_onnx_artifacts/`，`.gitignore` 已忽略根目录生成的 `.onnx/.rknn`；
+  `tools/export_native_640x480.py` 和 `tools/export_native_candidates.py` 已整理为可复用
+  参数化导出脚本；`TODO.md` 已移除完成项，仅保留后续未做工作。
+- EXP-001至EXP-008详细操作与结果见
+  `docs/YOLOv8s-RK3588推理优化实验记录.md`。
 - 测试时已经关注CPU/NPU governor；CPU频率会明显影响 `rknn_run()` 的同步耗时。
 - 当前摄像头可以任意朝向用于测量纯 `rknn_run()`，因为固定输入尺寸下的稠密卷积计算量
   基本不随画面内容变化。
@@ -98,7 +131,7 @@ V4L2摄像头采集
 3. 采用Rockchip官方优化检测头，将DFL和部分后处理移出NPU；
 4. 将模型输入从640×640改为匹配摄像头比例的640×480；
 5. 再评估576×448和512×384；
-6. 建立桌面六类业务验证集并微调；
+6. 建立桌面六类业务数据集并微调；
 7. 评估介于YOLOv8n和YOLOv8s之间的自定义宽度模型；
 8. 最后再考虑检测尺度调整、结构化剪枝、模块替换和知识蒸馏。
 
@@ -153,4 +186,6 @@ V4L2摄像头采集
 
 ## 下一步
 
-按照推理优化路线，进入下一优化阶段：将模型输入尺寸从 640x640 改为匹配摄像头比例的 640x480 并建立对应校准、转换与后处理映射，重新在 Host 仿真评估其精度与推理效率表现。
+不要将任何当前 640x480、576x448 或 512x384 候选接入生产，也不要放开生产 C++ 的矩形
+输入限制。当前直接缩小输入尺寸路线暂停；下一步优先进入桌面六类数据扩充与微调，先恢复
+或提升固定桌面验证集精度，再考虑压缩、缩小输入或板端部署。

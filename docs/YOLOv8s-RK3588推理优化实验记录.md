@@ -1058,3 +1058,314 @@ SRS在运行期间累计接收视频数据并报告递增帧数。Windows端FFmp
 - **结论**：
   - 板端实际生产组合（AlertGateway 二进制 + `yolov8s_rockchip_dfl.rknn` 模型 + `rockchip_dfl` 布局后处理 + `conf_threshold=0.25` 过滤阈值）已通过持续 60 秒以上的 Smoke 真机测试。
   - 证实了板端部署的 RKNN 固件确为 9 输出官方模型，且与生产配置的 `rockchip_dfl` 布局配置匹配，多线程安全退出与收尾无异常。
+
+---
+
+## EXP-007 640x480 输入尺寸优化准备
+
+### 状态
+
+进行中。已完成本地工具脚本准备、640x480 校准集拉取、640x480 九输出 ONNX/RKNN 候选生成和 Simulator 精度评估。当前候选在桌面场景精度明显退化，不能进入生产 C++ 接入。
+
+### 日期
+
+2026-07-08
+
+### 目的
+
+进入推理优化路线的下一阶段：将模型输入从当前 640x640 改为匹配摄像头比例的 640x480，减少无效像素计算和拉伸失真。正式改生产配置之前，需要先建立对应的校准、转换和离线精度评估流程。
+
+### 本次本地准备
+
+1. `tools/collect_calibration.py`
+   - 新增 `--model-width` 和 `--model-height` 参数；
+   - 默认仍保持 640x640，避免影响旧流程；
+   - 可直接采集 640x480 校准图，例如：
+     ```bash
+     python3 tools/collect_calibration.py \
+       --device /dev/video20 \
+       --count 150 \
+       --out ~/calibration_640x480 \
+       --model-width 640 \
+       --model-height 480 \
+       --no-preview
+     ```
+
+2. `tools/convert_int8.py`
+   - 新增 `--onnx`、`--calib-dir`、`--dataset-txt`、`--dataset-limit`、`--output-layout` 参数；
+   - 默认仍为旧 `decoded` 双输出流程；
+   - 指定 `--output-layout rockchip_dfl` 时直接保留官方 YOLO 输出，适合生成九输出 RKNN；
+   - 640x480 官方模型候选转换命令：
+     ```bash
+     python3 tools/convert_int8.py \
+       --onnx ~/yolov8s_official_640x480.onnx \
+       --calib-dir ~/calibration_640x480 \
+       --dataset-txt ~/calibration_640x480/dataset.txt \
+       --output-layout rockchip_dfl \
+       --output ~/yolov8s_rockchip_dfl_640x480.rknn \
+       --verbose-log /tmp/rknn_convert_640x480.log
+     ```
+
+3. `tools/benchmark/evaluate_precision.py`
+   - 新增 `--model-width` 和 `--model-height`，用于统一控制预处理 resize、坐标回映射和 `rockchip_dfl` 输出网格校验；
+   - 新增 `--model-mode`，允许只评估 `rockchip_dfl`，避免 640x480 阶段被旧 `decoded` 模型路径阻塞；
+   - 640x480 官方模型候选离线评估命令：
+     ```bash
+     python3 tools/benchmark/evaluate_precision.py \
+       --model-mode rockchip_dfl \
+       --official-onnx ~/yolov8s_official_640x480.onnx \
+       --calib-dataset ~/calibration_640x480/dataset.txt \
+       --model-width 640 \
+       --model-height 480 \
+       --conf-threshold 0.25 \
+       --nms-threshold 0.45 \
+       --eval-iou-threshold 0.50
+     ```
+
+### 脚本验证结果
+
+本次只做本地脚本级验证：
+
+```bash
+python3 -m py_compile tools/collect_calibration.py tools/convert_int8.py tools/benchmark/evaluate_precision.py
+git diff --check
+```
+
+结果均通过。
+
+### 640x480 候选模型生成与转换结果
+
+由于本机没有现成的 640x480 官方优化 ONNX，先基于已验证的 640x640 官方九输出 ONNX
+`/home/rambos/yolov8s_official.onnx` 修改静态输入/输出形状，生成候选：
+
+- ONNX：`/home/rambos/yolov8s_official_640x480.onnx`
+- ONNX 文件大小：`43M`
+- ONNX Runtime 零输入验证通过：
+  - 输入：`[1, 3, 480, 640]`
+  - 输出网格：`60x80`、`30x40`、`15x20`
+
+从板端 `192.168.0.200` 拉取已采集的 640x480 校准集到 Host：
+
+- 校准目录：`/home/rambos/calibration_640x480`
+- 校准图数量：`150`
+- 校准图尺寸：`480x640`
+- dataset：`/home/rambos/calibration_640x480/dataset.txt`，`150` 行
+
+使用 `tools/convert_int8.py --output-layout rockchip_dfl` 转换成功：
+
+- RKNN：`/home/rambos/yolov8s_rockchip_dfl_640x480.rknn`
+- RKNN 文件大小：`12M`
+- 转换日志：`/tmp/rknn_convert_640x480.log`
+- 转换脚本检查结果：`所有层均为 INT8，无 float/fp16 fallback`
+
+说明：RKNN build 日志中出现默认输入/输出 dtype 从 float32 改为 int8 的性能提示，这是
+当前生产九输出 INT8 路径的预期行为；`Split`/`Constant` 等张量的内部 qtype 提示没有
+被转换脚本识别为实际算子 fallback。
+
+### Simulator 精度评估结果
+
+命令：
+
+```bash
+python3 tools/benchmark/evaluate_precision.py \
+  --model-mode rockchip_dfl \
+  --official-onnx /home/rambos/yolov8s_official_640x480.onnx \
+  --calib-dataset /home/rambos/calibration_640x480/dataset.txt \
+  --model-width 640 \
+  --model-height 480 \
+  --conf-threshold 0.25 \
+  --nms-threshold 0.45 \
+  --eval-iou-threshold 0.50
+```
+
+结果：
+
+```text
+Model input: 640x480
+[Optimized [rockchip_dfl]]
+  COCO Subset mAP@0.5       | 68.15%
+  - cell phone Recall       | 100.00%
+  - cell phone Precision    | 50.00%
+  - cup Recall              | 66.67%
+  - cup Precision           | 66.67%
+  - keyboard Recall         | 50.00%
+  - keyboard Precision      | 50.00%
+  - mouse Recall            | 50.00%
+  - mouse Precision         | 100.00%
+  - laptop Recall           | 80.00%
+  - laptop Precision        | 66.67%
+  - book Recall             | 100.00%
+  - book Precision          | 100.00%
+  Desktop Scenario mAP@0.5  | 8.33%
+  - laptop Recall           | 16.67%
+  - laptop Precision        | 100.00%
+  - cup Recall              | 0.00%
+  - cup Precision           | 0.00%
+```
+
+对比 EXP-006 的 640x640 `rockchip_dfl` 基线：
+
+- COCO 子集：`60.16% -> 68.15%`，指标上升；
+- 桌面场景：`48.33% -> 8.33%`，严重退化；
+- 桌面 laptop Recall：`96.67% -> 16.67%`，严重退化；
+- 桌面 cup 仍为 `0.00%`，没有改善。
+
+### 结论
+
+本轮 640x480 候选模型虽然可以完成 ONNX Runtime 验证、RKNN INT8 转换和 Simulator
+推理，但桌面真实场景精度明显不可接受，不能进入生产 C++ 尺寸放开和板端 smoke 阶段。
+
+关键原因判断：当前 ONNX 是由 640x640 官方九输出模型修改静态输入/输出形状得到的候选，
+不是从训练/导出流程原生导出的 640x480 官方优化模型。它能跑通并产出正确网格形状，
+但不能证明模型在业务桌面场景上的检测质量可用。
+
+### 原生导出 ONNX 复测
+
+随后由 `ultralytics_yolov8` 定制库 `rk_opt_v1.6` 分支以 `format='rknn'` 专属逻辑导出
+原生 640x480 官方九输出 ONNX：
+
+- ONNX：`/home/rambos/yolov8s_official_native_640x480.onnx`
+- ONNX 文件大小：`43M`
+- 输入：`[1, 3, 480, 640]`
+- 输出网格：`60x80`、`30x40`、`15x20`
+- SHA-256：`c4b45fdf1d26de751a3e228806f3beacd8ebd64c243d04ff508c45dd3200f09b`
+
+本地复核发现它与改形候选文件 hash 不同，且 114 个 initializer 内容不同；因此它确实不是
+简单复制文件，值得单独转换和评估。使用同一套 150 张 640x480 校准图转换：
+
+- RKNN：`/home/rambos/yolov8s_rockchip_dfl_native_640x480.rknn`
+- RKNN 文件大小：`12M`
+- RKNN SHA-256：`39fa037904d9a7d9e620ff8ee8b4ace1bbdebe2b6b4c590382baf1949f8d14ef`
+- 转换日志：`/tmp/rknn_convert_native_640x480.log`
+- 转换脚本检查结果：`所有层均为 INT8，无 float/fp16 fallback`
+
+同一套 Simulator 精度评估结果：
+
+```text
+Model input: 640x480
+[Optimized [rockchip_dfl]]
+  COCO Subset mAP@0.5       | 68.15%
+  - cell phone Recall       | 100.00%
+  - cell phone Precision    | 50.00%
+  - cup Recall              | 66.67%
+  - cup Precision           | 66.67%
+  - keyboard Recall         | 50.00%
+  - keyboard Precision      | 50.00%
+  - mouse Recall            | 50.00%
+  - mouse Precision         | 100.00%
+  - laptop Recall           | 80.00%
+  - laptop Precision        | 66.67%
+  - book Recall             | 100.00%
+  - book Precision          | 100.00%
+  Desktop Scenario mAP@0.5  | 8.33%
+  - laptop Recall           | 16.67%
+  - laptop Precision        | 100.00%
+  - cup Recall              | 0.00%
+  - cup Precision           | 0.00%
+```
+
+原生导出模型与改形候选的离线评估结果完全一致，仍然不能进入生产接入。说明当前失败不是
+由“仅修改 ONNX 形状”这一动作单独造成；更可能是 640x480 拉伸/尺度变化对当前桌面验证集
+中的显示器目标召回影响过大，或当前小规模桌面验证集对该尺寸变化非常敏感。
+
+### 后续行动
+
+1. 暂停所有 640x480 候选进入生产，不修改 `InferThread` 矩形输入限制。
+2. 不再继续重复 640x480 ONNX/RKNN 转换，除非验证集或训练/微调策略发生变化。
+3. 优先评估更接近当前 640x640 分布的输入尺寸候选，或进入桌面六类数据扩充与微调。
+4. 在任一新候选进入生产前，必须先达到桌面场景 mAP 不低于当前 640x640 `rockchip_dfl` 基线的可接受范围。
+
+## EXP-008 576x448 与 512x384 输入尺寸候选验证
+
+### 状态
+
+已完成。两个更小输入尺寸候选均可原生导出 ONNX，并可转换为全 INT8 RKNN，但固定验证集
+精度均未通过，不能进入生产 C++ 接入或板端部署。
+
+### 目的
+
+在 640x480 候选失败后，继续验证路线中规划的 576x448 和 512x384 输入尺寸，确认降低
+输入像素量是否能在维持桌面业务精度的前提下换取潜在 NPU 耗时收益。
+
+### 产物与转换检查
+
+| 尺寸 | ONNX | ONNX SHA-256 | RKNN | RKNN SHA-256 | 转换检查 |
+|---|---|---|---|---|---|
+| 576x448 | `/home/rambos/yolov8s_official_native_576x448.onnx` | `17cf21c4f382015e1ba838bb603bbc6721bf444869994b065edd47f8674f1d7b` | `/home/rambos/yolov8s_rockchip_dfl_native_576x448.rknn` | `2453dc110fee667fddef5332bf322e49c4ea40447add908bf15daaeee1ead33e` | 全 INT8，无 float/fp16 fallback |
+| 512x384 | `/home/rambos/yolov8s_official_native_512x384.onnx` | `6fa5c73f1083122e45cb04fb7de2f2700623851537dc2ac4d97cbc30d265b3ef` | `/home/rambos/yolov8s_rockchip_dfl_native_512x384.rknn` | `39c650b45d12eb8669feb85ac500ab18a8b67cb6e75ee8de62e69813fa03e983` | 全 INT8，无 float/fp16 fallback |
+
+ONNX 输出网格检查：
+
+- 576x448：`56x72`、`28x36`、`14x18`；
+- 512x384：`48x64`、`24x32`、`12x16`。
+
+校准集：
+
+- `/home/rambos/calibration_576x448`：150 张 PNG，`dataset.txt` 150 行；
+- `/home/rambos/calibration_512x384`：150 张 PNG，`dataset.txt` 150 行。
+
+### Simulator 精度结果
+
+命令口径：`model-mode=rockchip_dfl`，`conf_threshold=0.25`，`nms_threshold=0.45`，
+`eval_iou_threshold=0.50`，同一套 COCO 20 张子集与桌面 30 帧验证集。
+
+```text
+Model input: 576x448
+[Optimized [rockchip_dfl]]
+  COCO Subset mAP@0.5       | 61.39%
+  - cell phone Recall       | 100.00%
+  - cell phone Precision    | 75.00%
+  - cup Recall              | 66.67%
+  - cup Precision           | 100.00%
+  - keyboard Recall         | 50.00%
+  - keyboard Precision      | 100.00%
+  - mouse Recall            | 50.00%
+  - mouse Precision         | 100.00%
+  - laptop Recall           | 60.00%
+  - laptop Precision        | 60.00%
+  - book Recall             | 50.00%
+  - book Precision          | 100.00%
+  Desktop Scenario mAP@0.5  | 13.33%
+  - laptop Recall           | 26.67%
+  - laptop Precision        | 100.00%
+  - cup Recall              | 0.00%
+  - cup Precision           | 0.00%
+
+Model input: 512x384
+[Optimized [rockchip_dfl]]
+  COCO Subset mAP@0.5       | 53.61%
+  - cell phone Recall       | 66.67%
+  - cell phone Precision    | 40.00%
+  - cup Recall              | 66.67%
+  - cup Precision           | 100.00%
+  - keyboard Recall         | 50.00%
+  - keyboard Precision      | 100.00%
+  - mouse Recall            | 50.00%
+  - mouse Precision         | 100.00%
+  - laptop Recall           | 60.00%
+  - laptop Precision        | 60.00%
+  - book Recall             | 50.00%
+  - book Precision          | 100.00%
+  Desktop Scenario mAP@0.5  | 5.00%
+  - laptop Recall           | 10.00%
+  - laptop Precision        | 100.00%
+  - cup Recall              | 0.00%
+  - cup Precision           | 0.00%
+```
+
+### 结论
+
+与 640x640 `rockchip_dfl` 基线相比，两个更小尺寸均未达到可接受精度：
+
+- 桌面场景 mAP 基线为 `48.33%`，576x448 降至 `13.33%`，512x384 降至 `5.00%`；
+- 桌面 laptop Recall 基线为 `96.67%`，576x448 降至 `26.67%`，512x384 降至 `10.00%`；
+- 桌面 cup 仍为 `0.00%`，没有改善。
+
+因此，当前“直接缩小输入尺寸”的路线在固定验证集上连续失败。不能将 576x448 或 512x384
+接入生产，也不应修改 `InferThread` 的模型输入尺寸限制。
+
+### 后续行动
+
+1. 暂停当前 YOLOv8s 官方九输出模型的输入尺寸继续缩小实验。
+2. 下一步转向桌面六类数据扩充与微调，先恢复/提升桌面验证集精度，再考虑压缩或缩小输入。
+3. 若未来重新尝试小尺寸，应基于微调后的业务模型，而不是直接缩放当前 COCO 权重。

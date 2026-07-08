@@ -63,15 +63,15 @@ def nms(dets, iou_thresh):
 # 3. 两种后处理算法实现（严格对齐 C++）
 
 # (1) decoded 双输出后处理
-def postprocess_decoded(outputs, orig_w, orig_h, conf_thresh, iou_thresh):
+def postprocess_decoded(outputs, orig_w, orig_h, model_w, model_h, conf_thresh, iou_thresh):
     # outputs[0]: boxes (1, 4, 8400)
     # outputs[1]: class_probs (1, 80, 8400) (ONNX 图里已经过 Sigmoid)
     boxes = outputs[0][0] # (4, 8400)
     cls_probs = outputs[1][0] # (80, 8400)
     
     n_anchors = boxes.shape[1]
-    sx = orig_w / 640.0
-    sy = orig_h / 640.0
+    sx = orig_w / float(model_w)
+    sy = orig_h / float(model_h)
     
     candidates = []
     for a in range(n_anchors):
@@ -112,10 +112,10 @@ def postprocess_decoded(outputs, orig_w, orig_h, conf_thresh, iou_thresh):
     return nms(candidates, iou_thresh)
 
 # (2) rockchip_dfl 九输出后处理
-def postprocess_rockchip(outputs, orig_w, orig_h, conf_thresh, iou_thresh):
+def postprocess_rockchip(outputs, orig_w, orig_h, model_w, model_h, conf_thresh, iou_thresh):
     # outputs 包含 9 个张量
-    scale_x = orig_w / 640.0
-    scale_y = orig_h / 640.0
+    scale_x = orig_w / float(model_w)
+    scale_y = orig_h / float(model_h)
     candidates = []
     
     for branch in range(3):
@@ -128,7 +128,13 @@ def postprocess_rockchip(outputs, orig_w, orig_h, conf_thresh, iou_thresh):
         sum_tensor = outputs[sum_idx][0][0]    # (H, W)
         
         H, W = box_tensor.shape[1], box_tensor.shape[2]
-        stride = 640 // H
+        if model_h % H != 0 or model_w % W != 0:
+            raise ValueError(f"输出网格 {W}x{H} 与模型输入 {model_w}x{model_h} 不整除")
+        stride_y = model_h // H
+        stride_x = model_w // W
+        if stride_x != stride_y:
+            raise ValueError(f"输出网格 {W}x{H} 推导出非等比 stride: x={stride_x}, y={stride_y}")
+        stride = stride_y
         dfl_len = box_tensor.shape[0] // 4 # 16
         
         for row in range(H):
@@ -339,7 +345,8 @@ def calculate_precision_metrics(gt_dataset, pred_dataset, eval_iou_thresh=0.5):
 
 # 7. 主流程：量化编译并在 Simulator 评估
 def evaluate_model(onnx_path, postprocess_fn, gt_dataset, images_info, dataset_txt,
-                   coco_subset_dir, desktop_frames_dir, conf_thresh, iou_thresh, is_decoded=True):
+                   coco_subset_dir, desktop_frames_dir, model_w, model_h,
+                   conf_thresh, iou_thresh, is_decoded=True):
     rknn = RKNN(verbose=False)
     rknn.config(
         mean_values=[[0, 0, 0]],
@@ -388,12 +395,12 @@ def evaluate_model(onnx_path, postprocess_fn, gt_dataset, images_info, dataset_t
             continue
             
         # 预处理与 C++ 对齐
-        img_resized = cv2.resize(img, (640, 640))
+        img_resized = cv2.resize(img, (model_w, model_h))
         img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
         
         outputs = rknn.inference(inputs=[img_rgb])
         
-        preds = postprocess_fn(outputs, orig_w, orig_h, conf_thresh, iou_thresh)
+        preds = postprocess_fn(outputs, orig_w, orig_h, model_w, model_h, conf_thresh, iou_thresh)
         predictions[filename] = preds
         
     rknn.release()
@@ -421,7 +428,15 @@ def main():
                         help="NMS IoU threshold for postprocessing")
     parser.add_argument("--eval-iou-threshold", type=float, default=0.50,
                         help="IoU threshold for evaluation match (e.g., mAP@0.5)")
+    parser.add_argument("--model-width", type=int, default=640,
+                        help="Model input width used by preprocessing")
+    parser.add_argument("--model-height", type=int, default=640,
+                        help="Model input height used by preprocessing")
+    parser.add_argument("--model-mode", choices=("both", "decoded", "rockchip_dfl"), default="both",
+                        help="Model(s) to evaluate (default: both)")
     args = parser.parse_args()
+    if args.model_width <= 0 or args.model_height <= 0:
+        raise ValueError("--model-width and --model-height must be positive")
 
     print("====================================================")
     print("  YOLOv8s-RK3588 Quantized Accuracy Evaluation Suite")
@@ -439,74 +454,81 @@ def main():
     print(f"Loaded {len(coco_gt)} COCO subset images and {len(desktop_gt)} desktop scenario frames.")
     print(f"Total evaluation size: {len(combined_gt)} frames.\n")
     
-    # (2) 评估 decoded 双输出模型 (生产配置)
-    print(">> 1/2 Evaluating Production [decoded] Model...")
-    t0 = time.time()
-    decoded_preds = evaluate_model(
-        onnx_path=args.yolo_onnx,
-        postprocess_fn=postprocess_decoded,
-        gt_dataset=combined_gt,
-        images_info=coco_images_info,
-        dataset_txt=args.calib_dataset,
-        coco_subset_dir=args.coco_subset_dir,
-        desktop_frames_dir=args.desktop_frames_dir,
-        conf_thresh=args.conf_threshold,
-        iou_thresh=args.nms_threshold,
-        is_decoded=True
-    )
-    t1 = time.time()
-    print(f"Production [decoded] Model evaluation completed in {t1 - t0:.1f} seconds.\n")
+    decoded_preds = None
+    rockchip_preds = None
+
+    if args.model_mode in ("both", "decoded"):
+        print(">> Evaluating Production [decoded] Model...")
+        t0 = time.time()
+        decoded_preds = evaluate_model(
+            onnx_path=args.yolo_onnx,
+            postprocess_fn=postprocess_decoded,
+            gt_dataset=combined_gt,
+            images_info=coco_images_info,
+            dataset_txt=args.calib_dataset,
+            coco_subset_dir=args.coco_subset_dir,
+            desktop_frames_dir=args.desktop_frames_dir,
+            model_w=args.model_width,
+            model_h=args.model_height,
+            conf_thresh=args.conf_threshold,
+            iou_thresh=args.nms_threshold,
+            is_decoded=True
+        )
+        t1 = time.time()
+        print(f"Production [decoded] Model evaluation completed in {t1 - t0:.1f} seconds.\n")
     
-    # (3) 评估 rockchip_dfl 九输出模型 (优化候选)
-    print(">> 2/2 Evaluating Optimized [rockchip_dfl] Model...")
-    t0 = time.time()
-    rockchip_preds = evaluate_model(
-        onnx_path=args.official_onnx,
-        postprocess_fn=postprocess_rockchip,
-        gt_dataset=combined_gt,
-        images_info=coco_images_info,
-        dataset_txt=args.calib_dataset,
-        coco_subset_dir=args.coco_subset_dir,
-        desktop_frames_dir=args.desktop_frames_dir,
-        conf_thresh=args.conf_threshold,
-        iou_thresh=args.nms_threshold,
-        is_decoded=False
-    )
-    t1 = time.time()
-    print(f"Optimized [rockchip_dfl] Model evaluation completed in {t1 - t0:.1f} seconds.\n")
+    if args.model_mode in ("both", "rockchip_dfl"):
+        print(">> Evaluating Optimized [rockchip_dfl] Model...")
+        t0 = time.time()
+        rockchip_preds = evaluate_model(
+            onnx_path=args.official_onnx,
+            postprocess_fn=postprocess_rockchip,
+            gt_dataset=combined_gt,
+            images_info=coco_images_info,
+            dataset_txt=args.calib_dataset,
+            coco_subset_dir=args.coco_subset_dir,
+            desktop_frames_dir=args.desktop_frames_dir,
+            model_w=args.model_width,
+            model_h=args.model_height,
+            conf_thresh=args.conf_threshold,
+            iou_thresh=args.nms_threshold,
+            is_decoded=False
+        )
+        t1 = time.time()
+        print(f"Optimized [rockchip_dfl] Model evaluation completed in {t1 - t0:.1f} seconds.\n")
     
     # (4) 计算精度指标并输出报表
     print(f">> Calculating Accuracy metrics (IoU threshold = {args.eval_iou_threshold:.2f})...")
     
-    coco_map_dec, coco_res_dec = calculate_precision_metrics(coco_gt, {k: decoded_preds[k] for k in coco_gt.keys()}, args.eval_iou_threshold)
-    coco_map_roc, coco_res_roc = calculate_precision_metrics(coco_gt, {k: rockchip_preds[k] for k in coco_gt.keys()}, args.eval_iou_threshold)
-    
-    desk_map_dec, desk_res_dec = calculate_precision_metrics(desktop_gt, {k: decoded_preds[k] for k in desktop_gt.keys()}, args.eval_iou_threshold)
-    desk_map_roc, desk_res_roc = calculate_precision_metrics(desktop_gt, {k: rockchip_preds[k] for k in desktop_gt.keys()}, args.eval_iou_threshold)
-    
-    # 打印最终对比报表
+    reports = []
+    if decoded_preds is not None:
+        coco_map, coco_res = calculate_precision_metrics(coco_gt, {k: decoded_preds[k] for k in coco_gt.keys()}, args.eval_iou_threshold)
+        desk_map, desk_res = calculate_precision_metrics(desktop_gt, {k: decoded_preds[k] for k in desktop_gt.keys()}, args.eval_iou_threshold)
+        reports.append(("Production [decoded]", coco_map, coco_res, desk_map, desk_res))
+    if rockchip_preds is not None:
+        coco_map, coco_res = calculate_precision_metrics(coco_gt, {k: rockchip_preds[k] for k in coco_gt.keys()}, args.eval_iou_threshold)
+        desk_map, desk_res = calculate_precision_metrics(desktop_gt, {k: rockchip_preds[k] for k in desktop_gt.keys()}, args.eval_iou_threshold)
+        reports.append(("Optimized [rockchip_dfl]", coco_map, coco_res, desk_map, desk_res))
+
     print("\n" + "="*80)
-    print("                    ACCURACY METRICS COMPARISON REPORT")
+    print("                    ACCURACY METRICS REPORT")
     print("="*80)
-    print(f" {'Metric':<25} | {'Production [decoded]':^23} | {'Optimized [rockchip_dfl]':^23} ")
+    print(f" Model input: {args.model_width}x{args.model_height}")
     print("-"*80)
-    
-    print(f" [COCO Subset (20 imgs)]")
-    print(f"  mAP@0.5                   | {coco_map_dec:>20.2%} | {coco_map_roc:>20.2%} ")
-    for cls in TARGET_CLASSES:
-        dec_info = coco_res_dec[cls]
-        roc_info = coco_res_roc[cls]
-        print(f"  - {cls:<18} Recall  | {dec_info['recall']:>20.2%} | {roc_info['recall']:>20.2%} ")
-        print(f"  - {cls:<18} Precision| {dec_info['precision']:>20.2%} | {roc_info['precision']:>20.2%} ")
-        
-    print("-"*80)
-    print(f" [Desktop Scenario (30 frames)]")
-    print(f"  mAP@0.5                   | {desk_map_dec:>20.2%} | {desk_map_roc:>20.2%} ")
-    for cls in ["laptop", "cup"]:
-        dec_info = desk_res_dec[cls]
-        roc_info = desk_res_roc[cls]
-        print(f"  - {cls:<18} Recall  | {dec_info['recall']:>20.2%} | {roc_info['recall']:>20.2%} ")
-        print(f"  - {cls:<18} Precision| {dec_info['precision']:>20.2%} | {roc_info['precision']:>20.2%} ")
+
+    for model_name, coco_map, coco_res, desk_map, desk_res in reports:
+        print(f" [{model_name}]")
+        print(f"  COCO Subset mAP@0.5       | {coco_map:>20.2%}")
+        for cls in TARGET_CLASSES:
+            info = coco_res[cls]
+            print(f"  - {cls:<18} Recall  | {info['recall']:>20.2%}")
+            print(f"  - {cls:<18} Precision| {info['precision']:>20.2%}")
+        print(f"  Desktop Scenario mAP@0.5  | {desk_map:>20.2%}")
+        for cls in ["laptop", "cup"]:
+            info = desk_res[cls]
+            print(f"  - {cls:<18} Recall  | {info['recall']:>20.2%}")
+            print(f"  - {cls:<18} Precision| {info['precision']:>20.2%}")
+        print("-"*80)
     print("="*80 + "\n")
 
 if __name__ == "__main__":

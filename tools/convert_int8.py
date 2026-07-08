@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
 将 yolov8s.onnx 转换为 INT8 量化 rknn 模型。
-校准数据集：~/calibration/calib_*.png（640×640 RGB，与推理预处理一致）
+校准数据集：默认 ~/calibration/calib_*.png，图片尺寸需与模型输入尺寸和推理预处理一致。
 
 用法：
     python3 tools/convert_int8.py
     python3 tools/convert_int8.py --optimization-level 2 \
         --output ~/exp002/yolov8s_opt2.rknn
+    python3 tools/convert_int8.py --onnx ~/yolov8s_640x480.onnx \
+        --calib-dir ~/calibration_640x480 \
+        --dataset-txt ~/calibration_640x480/dataset.txt \
+        --output-layout rockchip_dfl \
+        --output ~/yolov8s_rockchip_dfl_640x480.rknn
 """
 import argparse
 import os
 import glob
-import numpy as np
-import cv2
 from rknn.api import RKNN
 
 ONNX_MODEL    = os.path.expanduser("~/yolov8s.onnx")
@@ -30,6 +33,11 @@ VERBOSE_LOG   = "/tmp/rknn_convert_verbose.log"
 def parse_args():
     parser = argparse.ArgumentParser(description="Convert YOLOv8s ONNX to an INT8 RKNN model")
     parser.add_argument(
+        "--onnx",
+        default=ONNX_MODEL,
+        help=f"input ONNX path (default: {ONNX_MODEL})",
+    )
+    parser.add_argument(
         "--optimization-level",
         type=int,
         choices=range(4),
@@ -41,6 +49,28 @@ def parse_args():
         "--output",
         default=RKNN_MODEL,
         help=f"output RKNN path (default: {RKNN_MODEL})",
+    )
+    parser.add_argument(
+        "--calib-dir",
+        default=CALIB_DIR,
+        help=f"directory containing calib_*.png (default: {CALIB_DIR})",
+    )
+    parser.add_argument(
+        "--dataset-txt",
+        default=DATASET_TXT,
+        help=f"calibration dataset list path (default: {DATASET_TXT})",
+    )
+    parser.add_argument(
+        "--dataset-limit",
+        type=int,
+        default=150,
+        help="maximum calibration images to include (default: 150)",
+    )
+    parser.add_argument(
+        "--output-layout",
+        choices=("decoded", "rockchip_dfl"),
+        default="decoded",
+        help="decoded exports two explicit heads; rockchip_dfl keeps official YOLO outputs (default: decoded)",
     )
     parser.add_argument(
         "--verbose-log",
@@ -75,9 +105,12 @@ def print_non_int8_layers(log_path):
 
 
 def make_dataset_txt(calib_dir, txt_path, limit=150):
+    calib_dir = os.path.expanduser(calib_dir)
+    txt_path = os.path.expanduser(txt_path)
     paths = sorted(glob.glob(os.path.join(calib_dir, "calib_*.png")))[:limit]
     if not paths:
         raise FileNotFoundError(f"未找到校准图片：{calib_dir}/calib_*.png")
+    os.makedirs(os.path.dirname(os.path.abspath(txt_path)), exist_ok=True)
     contents = "".join(p + "\n" for p in paths)
     current_contents = None
     if os.path.exists(txt_path):
@@ -92,6 +125,7 @@ def make_dataset_txt(calib_dir, txt_path, limit=150):
 
 def main():
     args = parse_args()
+    onnx_path = os.path.expanduser(args.onnx)
     output_path = os.path.expanduser(args.output)
     verbose_log = os.path.expanduser(args.verbose_log)
     output_dir = os.path.dirname(os.path.abspath(output_path))
@@ -102,7 +136,7 @@ def main():
     rknn = RKNN(verbose=True, verbose_file=verbose_log)
 
     # 1. 配置：INT8 量化 + RK3588 平台
-    print(f">> 配置模型（optimization_level={args.optimization_level}）...")
+    print(f">> 配置模型（layout={args.output_layout}, optimization_level={args.optimization_level}）...")
     rknn.config(
         mean_values=MEAN_VALUES,
         std_values=STD_VALUES,
@@ -117,15 +151,20 @@ def main():
     # 作为输出，分别量化校准。原始单一 84 通道合并输出共享一组 scale，对 box 坐标
     # （范围 0-640）和 class 概率（范围 0-1）这种数量级悬殊的数据用同一个 scale
     # 量化，会把 class 概率的精度完全压没（反量化回来全部变成 0）。
-    print(f">> 加载 ONNX：{ONNX_MODEL}")
-    ret = rknn.load_onnx(model=ONNX_MODEL,
-                          outputs=['/model.22/Mul_2_output_0', '/model.22/Sigmoid_output_0'])
+    print(f">> 加载 ONNX：{onnx_path}")
+    if args.output_layout == "decoded":
+        ret = rknn.load_onnx(
+            model=onnx_path,
+            outputs=['/model.22/Mul_2_output_0', '/model.22/Sigmoid_output_0'],
+        )
+    else:
+        ret = rknn.load_onnx(model=onnx_path)
     if ret != 0:
         raise RuntimeError(f"load_onnx 失败：{ret}")
 
     # 3. INT8 量化构建（传入 dataset.txt 文件路径）
     print(">> 开始量化构建（耗时约 3-5 分钟）...")
-    dataset_txt = make_dataset_txt(CALIB_DIR, DATASET_TXT)
+    dataset_txt = make_dataset_txt(args.calib_dir, args.dataset_txt, args.dataset_limit)
     ret = rknn.build(do_quantization=True, dataset=dataset_txt)
     if ret != 0:
         raise RuntimeError(f"build 失败：{ret}")
@@ -141,7 +180,7 @@ def main():
 
     rknn.release()
     print(f"\n完成！INT8 模型已保存至：{output_path}")
-    print("后续：scp 上传到板子，替换 ~/AlertGateway/model/yolov8s.rknn")
+    print("后续：scp 上传到板子，并按 output_layout 配置匹配的模型文件名。")
 
 
 if __name__ == "__main__":
