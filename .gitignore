@@ -21,3 +21,10 @@ model/*.onnx
 .DS_Store
 
 # personal study notes — tracked (interview_qa.md was split into per-topic files under notes/)
+
+# python bytecode
+__pycache__/
+*.pyc
+
+# IDE/Codex settings
+.codex/

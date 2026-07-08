@@ -71,41 +71,80 @@ void EncodeThread::stop() {
 // 这种内存硬件编码器能直接DMA访问，跟CPU malloc的堆内存是两种东西。
 bool EncodeThread::init_mpp() {
     // MPP 编码器初始化的第一步——创建上下文 + 指定工作模式
-    if (mpp_create(&ctx_, &mpi_) != MPP_OK) return false;
-    if (mpp_init(ctx_, MPP_CTX_ENC, MPP_VIDEO_CodingAVC) != MPP_OK) return false;
+    MPP_RET ret = mpp_create(&ctx_, &mpi_);
+    if (ret != MPP_OK) {
+        std::cerr << "mpp_create failed: " << ret << "\n";
+        return false;
+    }
+    ret = mpp_init(ctx_, MPP_CTX_ENC, MPP_VIDEO_CodingAVC);
+    if (ret != MPP_OK) {
+        std::cerr << "mpp_init encoder failed: " << ret << "\n";
+        deinit_mpp();
+        return false;
+    }
 
     MppEncCfg enc_cfg;
-    mpp_enc_cfg_init(&enc_cfg);
+    ret = mpp_enc_cfg_init(&enc_cfg);
+    if (ret != MPP_OK) {
+        std::cerr << "mpp_enc_cfg_init failed: " << ret << "\n";
+        deinit_mpp();
+        return false;
+    }
 
-    mpp_enc_cfg_set_s32(enc_cfg, "prep:width",        cfg_.width);
-    mpp_enc_cfg_set_s32(enc_cfg, "prep:height",       cfg_.height);
-    mpp_enc_cfg_set_s32(enc_cfg, "prep:hor_stride",   cfg_.width);
-    mpp_enc_cfg_set_s32(enc_cfg, "prep:ver_stride",   cfg_.height);
-    mpp_enc_cfg_set_s32(enc_cfg, "prep:format",       MPP_FMT_YUV420SP);  // NV12，跟 yuyv_to_nv12 输出的格式对应
+    auto set_s32 = [&](const char* name, RK_S32 value) {
+        MPP_RET set_ret = mpp_enc_cfg_set_s32(enc_cfg, name, value);
+        if (set_ret != MPP_OK) {
+            std::cerr << "mpp_enc_cfg_set_s32(" << name << ") failed: "
+                      << set_ret << "\n";
+        }
+        return set_ret == MPP_OK;
+    };
 
-    mpp_enc_cfg_set_s32(enc_cfg, "codec:type",        MPP_VIDEO_CodingAVC);
-    mpp_enc_cfg_set_s32(enc_cfg, "h264:profile",      77);  // Main profile — wide player support
-    mpp_enc_cfg_set_s32(enc_cfg, "h264:level",        31);  // Level 3.1 — fits 640×480@30fps
+    bool cfg_ok = true;
+    cfg_ok = set_s32("prep:width",        cfg_.width) && cfg_ok;
+    cfg_ok = set_s32("prep:height",       cfg_.height) && cfg_ok;
+    cfg_ok = set_s32("prep:hor_stride",   cfg_.width) && cfg_ok;
+    cfg_ok = set_s32("prep:ver_stride",   cfg_.height) && cfg_ok;
+    cfg_ok = set_s32("prep:format",       MPP_FMT_YUV420SP) && cfg_ok;  // NV12，跟 yuyv_to_nv12 输出的格式对应
+
+    cfg_ok = set_s32("codec:type",        MPP_VIDEO_CodingAVC) && cfg_ok;
+    cfg_ok = set_s32("h264:profile",      77) && cfg_ok;  // Main profile — wide player support
+    cfg_ok = set_s32("h264:level",        31) && cfg_ok;  // Level 3.1 — fits 640×480@30fps
     // CBR：恒定码率，给RTMP直播推流用，带宽要稳定；不像录像场景能用VBR换更好画质
-    mpp_enc_cfg_set_s32(enc_cfg, "rc:mode",           MPP_ENC_RC_MODE_CBR);
-    mpp_enc_cfg_set_s32(enc_cfg, "rc:bps_target",     cfg_.bitrate_kbps * 1000);
-    mpp_enc_cfg_set_s32(enc_cfg, "rc:bps_max",        cfg_.bitrate_kbps * 1200);
-    mpp_enc_cfg_set_s32(enc_cfg, "rc:bps_min",        cfg_.bitrate_kbps * 800);
-    mpp_enc_cfg_set_s32(enc_cfg, "rc:fps_in_num",     cfg_.fps);
-    mpp_enc_cfg_set_s32(enc_cfg, "rc:fps_in_denorm",  1);
-    mpp_enc_cfg_set_s32(enc_cfg, "rc:fps_out_num",    cfg_.fps);
-    mpp_enc_cfg_set_s32(enc_cfg, "rc:fps_out_denorm", 1);
+    cfg_ok = set_s32("rc:mode",           MPP_ENC_RC_MODE_CBR) && cfg_ok;
+    cfg_ok = set_s32("rc:bps_target",     cfg_.bitrate_kbps * 1000) && cfg_ok;
+    cfg_ok = set_s32("rc:bps_max",        cfg_.bitrate_kbps * 1200) && cfg_ok;
+    cfg_ok = set_s32("rc:bps_min",        cfg_.bitrate_kbps * 800) && cfg_ok;
+    cfg_ok = set_s32("rc:fps_in_num",     cfg_.fps) && cfg_ok;
+    cfg_ok = set_s32("rc:fps_in_denorm",  1) && cfg_ok;
+    cfg_ok = set_s32("rc:fps_out_num",    cfg_.fps) && cfg_ok;
+    cfg_ok = set_s32("rc:fps_out_denorm", 1) && cfg_ok;
     // GOP小(关键帧密)抗丢包、方便随机访问但码率开销大；这里是基于低帧率+实时性优先的选择
-    mpp_enc_cfg_set_s32(enc_cfg, "rc:gop",            8);  // keyframe every ~550ms at 14.6fps
+    cfg_ok = set_s32("rc:gop",            8) && cfg_ok;  // keyframe every ~550ms at 14.6fps
+    if (!cfg_ok) {
+        mpp_enc_cfg_deinit(enc_cfg);
+        deinit_mpp();
+        return false;
+    }
 
     //提交配置
-    MPP_RET ret = mpi_->control(ctx_, MPP_ENC_SET_CFG, enc_cfg);
+    ret = mpi_->control(ctx_, MPP_ENC_SET_CFG, enc_cfg);
     mpp_enc_cfg_deinit(enc_cfg);
-    if (ret != MPP_OK) return false;
+    if (ret != MPP_OK) {
+        std::cerr << "MPP_ENC_SET_CFG failed: " << ret << "\n";
+        deinit_mpp();
+        return false;
+    }
 
     // DRM buffer group：硬件能直接DMA访问的物理内存池，run()里每帧从这里取一块，
     // memcpy进NV12数据后交给编码器（这次memcpy是否能省掉是潜在优化方向，待确认）
-    mpp_buffer_group_get_internal(&buf_group_, MPP_BUFFER_TYPE_DRM);
+    ret = mpp_buffer_group_get_internal(&buf_group_, MPP_BUFFER_TYPE_DRM);
+    if (ret != MPP_OK || !buf_group_) {
+        std::cerr << "mpp_buffer_group_get_internal(DRM) failed: "
+                  << ret << "\n";
+        deinit_mpp();
+        return false;
+    }
     return true;
 }
 
@@ -426,8 +465,17 @@ void EncodeThread::run() {
 
         // 先从 DRM 池取 buffer，让 RGA 转换结果直接写入，省掉一次 memcpy
         MppBuffer frame_buf = nullptr;
-        mpp_buffer_get(buf_group_, &frame_buf, frame_size);
+        MPP_RET ret = mpp_buffer_get(buf_group_, &frame_buf, frame_size);
+        if (ret != MPP_OK || !frame_buf) {
+            std::cerr << "[Encode] mpp_buffer_get failed: " << ret << "\n";
+            continue;
+        }
         uint8_t* drm_ptr = static_cast<uint8_t*>(mpp_buffer_get_ptr(frame_buf));
+        if (!drm_ptr) {
+            std::cerr << "[Encode] mpp_buffer_get_ptr returned null\n";
+            mpp_buffer_put(frame_buf);
+            continue;
+        }
 
         // YUYV → NV12：RGA 直接写入 DRM buffer，失败时回退 CPU + memcpy 兜底
         bool rga_ok = rga_yuyv_to_nv12(frame.raw_data.data(), drm_ptr, w, h);
@@ -463,7 +511,12 @@ void EncodeThread::run() {
         }
 
         MppFrame mpp_frame = nullptr;
-        mpp_frame_init(&mpp_frame);
+        ret = mpp_frame_init(&mpp_frame);
+        if (ret != MPP_OK || !mpp_frame) {
+            std::cerr << "[Encode] mpp_frame_init failed: " << ret << "\n";
+            mpp_buffer_put(frame_buf);
+            continue;
+        }
         mpp_frame_set_width(mpp_frame,      w);
         mpp_frame_set_height(mpp_frame,     h);
         mpp_frame_set_hor_stride(mpp_frame, w);
@@ -474,11 +527,14 @@ void EncodeThread::run() {
         mpp_frame_set_eos(mpp_frame,        0);
 
         // 把这一帧真正"喂"给硬件编码器
-        mpi_->encode_put_frame(ctx_, mpp_frame);
+        ret = mpi_->encode_put_frame(ctx_, mpp_frame);
         // 销毁 MppFrame 这个"描述符"对象
         mpp_frame_deinit(&mpp_frame);
-        
         mpp_buffer_put(frame_buf);
+        if (ret != MPP_OK) {
+            std::cerr << "[Encode] encode_put_frame failed: " << ret << "\n";
+            continue;
+        }
         frame_idx_++;
 
         // 编码器内部有流水线缓冲，一次put不一定对应一次get，循环取干净避免包积压
@@ -491,11 +547,21 @@ void EncodeThread::run() {
             // 从包的meta里读是否关键帧（I帧），下游推流/解码要靠这个标记定位GOP边界
             MppMeta meta = mpp_packet_get_meta(packet);
             RK_S32 is_intra = 0;
-            mpp_meta_get_s32(meta, KEY_OUTPUT_INTRA, &is_intra);
+            ret = mpp_meta_get_s32(meta, KEY_OUTPUT_INTRA, &is_intra);
+            if (ret != MPP_OK) {
+                std::cerr << "[Encode] mpp_meta_get_s32(KEY_OUTPUT_INTRA) failed: "
+                          << ret << "\n";
+            }
             ep.is_keyframe = (is_intra != 0);
 
             void*  data = mpp_packet_get_pos(packet);
             size_t len  = mpp_packet_get_length(packet);
+            if (!data || len == 0) {
+                std::cerr << "[Encode] empty encoded packet\n";
+                mpp_packet_deinit(&packet);
+                packet = nullptr;
+                continue;
+            }
             ep.data.assign(static_cast<uint8_t*>(data),
                            static_cast<uint8_t*>(data) + len);
             mpp_packet_deinit(&packet);

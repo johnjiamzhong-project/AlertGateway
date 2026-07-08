@@ -6,9 +6,9 @@
     "fps": 15
   },
   "model": {
-    "path": "model/yolov8s.rknn",
-    "output_layout": "decoded",
-    "conf_threshold": 0.15,
+    "path": "model/yolov8s_rockchip_dfl.rknn",
+    "output_layout": "rockchip_dfl",
+    "conf_threshold": 0.25,
     "iou_threshold": 0.45
   },
   "detection": {

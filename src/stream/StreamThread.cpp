@@ -15,7 +15,9 @@ StreamThread::~StreamThread() { stop(); }
 // 连接失败直接抛异常终止启动——推流是流水线终点，连不上没有降级方案。
 // 成功后置 running_=true 并起 run() 所在的工作线程。
 void StreamThread::start() {
-    avformat_network_init();
+    int ret = avformat_network_init();
+    if (ret < 0)
+        throw std::runtime_error("StreamThread: avformat_network_init failed");
     if (!open_rtmp())
         throw std::runtime_error("StreamThread: failed to connect " + cfg_.rtmp_url);
     running_ = true;
@@ -89,6 +91,10 @@ bool StreamThread::write_extradata(const uint8_t* sps, size_t sps_len,
     // + SPS数据(带2字节长度前缀) + PPS数据(带2字节长度前缀)
     size_t extra_size = 11 + sps_len + pps_len;
     auto* extra = static_cast<uint8_t*>(av_mallocz(extra_size + AV_INPUT_BUFFER_PADDING_SIZE));
+    if (!extra) {
+        std::cerr << "StreamThread: av_mallocz extradata failed\n";
+        return false;
+    }
     size_t p = 0;
     extra[p++] = 0x01;                                            // configurationVersion=1
     extra[p++] = sps[1]; extra[p++] = sps[2]; extra[p++] = sps[3]; // profile/兼容性/level，直接抄SPS里的
@@ -181,6 +187,10 @@ bool StreamThread::write_packet(const EncodedPacket& ep) {
     // pts/dts 用 pkt_idx_ 线性递增(按帧计数，不是按时间)，靠 av_packet_rescale_ts
     // 从 {1,fps} 这个时间基换算成 video_st_->time_base 要求的单位
     AVPacket* pkt = av_packet_alloc();
+    if (!pkt) {
+        std::cerr << "StreamThread: av_packet_alloc failed\n";
+        return false;
+    }
     pkt->data  = avcc.data();
     pkt->size  = static_cast<int>(avcc.size());
     pkt->pts   = pkt->dts = pkt_idx_++;

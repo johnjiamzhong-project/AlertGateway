@@ -1,6 +1,6 @@
 # AlertGateway 项目记忆
 
-最后更新：2026-07-07
+最后更新：2026-07-08
 
 ## 使用规则
 
@@ -29,13 +29,12 @@ V4L2摄像头采集
 
 ## 当前已确认状态
 
-- Git分支：`master`，最近检查时与 `origin/master` 位于同一提交。
+- Git分支：`master`，本地已提交 `b190edb`，当前领先 `origin/master` 1 个提交。
 - 工作区存在用户自己的未提交修改和未跟踪文档，处理任务时必须保留，不能覆盖或清理。
 - 本地已有ARM64构建产物 `build/AlertGateway`。
 - 仓库内 `model/` 只有 `.gitkeep`；实际运行所需的 `model/yolov8s.rknn` 未纳入Git。
 - 运行配置为摄像头640×480、15 FPS、模型输入在当前代码中固定为640×640。
-- 当前模型是YOLOv8s INT8，box和class在ONNX最终Concat前拆为两个输出，避免共享量化
-  scale导致class概率丢失。
+- 当前生产配置已切换为 Rockchip 官方九输出 YOLOv8s INT8，使用 rockchip_dfl 后处理；旧 decoded 双输出模型仍作为对照基线。
 - 推理和编码已经解耦；推理结果通过 `SharedDetections` 提供给编码线程。
 - 推理和编码预处理均优先使用RGA，失败时保留CPU兜底。
 - 视频流叠框已支持在检测框顶部/内部绘制“类别 + 置信度”的中文文本标签（如“杯子 87%”），基于内置的 8x16 ASCII 及 16x16 中文位图字体，在 NV12 DRM Buffer 上直接渲染，支持 UTF-8 字符解码与动态宽度计算，不引入外部 OpenCV 依赖，并作了严格裁剪防御越界。
@@ -76,7 +75,11 @@ V4L2摄像头采集
   `draw_detection_labels=true`、`bitrate_kbps=3000`候选版本并已启动，
   `rockchip-performance`锁频服务处于active状态；SRS流验证为H.264 Main、
   640×480、约15.17 FPS。
-- EXP-001至EXP-004详细操作与结果见 `docs/YOLOv8s-RK3588推理优化实验记录.md`。
+- 2026-07-07 完成固定桌面场景（带 COCO 六类目标）的文字标签及 2/3 Mbps A/B 验证（EXP-005）。测试配置 `output_layout=decoded`，通过板端本地 FLV 写入规避 SRS 网络连通限制，每组运行约 25 秒。实际测量码率：3M 组为 2992/2986 kbps（偏差 <0.4%），2M 组为 1984/1989 kbps（偏差 <0.8%）；ffprobe 帧率稳定在 15.17 fps，日志平均编码帧率 13.4 fps；文字标签开关及码率变化对系统帧率与推理效率无负面影响；全过程稳定检测到目标，零错误，板端配置及进程均已恢复。
+- 2026-07-08 完成 EXP-005 人工画质评估与 30 帧人工精度核对。黑底中文标签清晰度与遮挡均在极佳状态；2 Mbps 码率细节虽微有蚊噪但完全可接受并节省 33.3% 带宽，推荐作为生产配置。30 帧核对发现戴尔显示屏稳定检出但错检为 laptop，易拉罐全程漏检，棉柔巾纸盒存在低置信度误检，建议设置过滤阈值 conf_threshold >= 0.25。结论允许且推荐进入固定标注集自动评估阶段。
+- 2026-07-08 完成 EXP-006 官方九输出与生产双输出模型精度量化仿真对比。两者整体 mAP 均完全对齐（COCO 子集 60.16%、桌面场景 48.33%），证明精度无任何损失，且九输出在部分类别（cup/laptop）的 Precision 指标上因精细 Softmax 而略微领先。已正式将生产配置 config.json 中的 model.output_layout 从 decoded 切换为 rockchip_dfl。
+- 2026-07-08 完成板端生产配置 Smoke 真机验证。部署新命名的官方九输出模型 ~/AlertGateway/model/yolov8s_rockchip_dfl.rknn，并将 config.json 的 model.output_layout 切换为 rockchip_dfl，conf_threshold 设定为 0.25，stream.bitrate_kbps 设定为 2000。程序在本地 FLV 推流配置下稳定运行 62.533 秒，无任何推理/编码链报错，并在超时后通过 SIGTERM 信号优雅退出（Done），证实了九输出模型固件与生产配置的配置匹配正常。
+- EXP-001至EXP-006详细操作与结果见 `docs/YOLOv8s-RK3588推理优化实验记录.md`。
 - 测试时已经关注CPU/NPU governor；CPU频率会明显影响 `rknn_run()` 的同步耗时。
 - 当前摄像头可以任意朝向用于测量纯 `rknn_run()`，因为固定输入尺寸下的稠密卷积计算量
   基本不随画面内容变化。
@@ -125,16 +128,24 @@ V4L2摄像头采集
   固定桌面场景人工对照、文字标签画质 A/B、固定标注集评估和生产切换决策。
 - 2026-07-07 已修正 MQTT 去重逻辑：保留上报 payload 中的 `timestamp`，但使用不含
   timestamp 的 `objects` 内容签名做变化判断，避免时间变化导致每个周期重复上报。
+- 2026-07-07 已补充 V4L2 协商参数校验：`CaptureThread` 在 `VIDIOC_S_FMT/S_PARM`
+  后回读并记录实际 width、height、pixelformat、bytesperline、sizeimage 和 fps；
+  非 YUYV、分辨率不匹配或 YUYV 行跨度不匹配会启动失败，帧率偏差会告警。
+- 2026-07-07 已补充关键调用返回值检查：MPP 初始化配置、DRM buffer 申请、
+  MppFrame 初始化、`encode_put_frame`、编码包 metadata/空包、FFmpeg 网络初始化、
+  extradata 分配和 AVPacket 分配失败路径均已记录日志并中止启动或跳过当前帧。
+- 2026-07-07 板端 smoke 验证通过：仅部署新二进制，保留板端真实配置；因
+  `192.168.0.168:1935` 的 SRS 未启动，使用板端临时 FFmpeg RTMP listener 和临时配置
+  `rtmp://127.0.0.1/live/desk` 跑满 60 秒。V4L2 协商为 640×480 YUYV、
+  `bytesperline=1280`、`sizeimage=614400`、15/1 fps；MPP 按 640×480、15 fps、
+  3000 kbps CBR 初始化；编码稳定打印 15.1 fps；FFmpeg 成功识别并解码 H.264 Main
+  yuv420p 640×480、约 15.17 fps，累计接收 860 帧。`ALERTGATEWAY_RC=124` 来自
+  `timeout` 主动中断，日志正常 `Shutting down... Done.`，未触发新增错误路径。
 
 ## 已发现但尚未处理的工程问题
 
 这些问题不是当前算法优化主线，但后续不能遗忘：
 
-- 新增的逐框黑底高对比度文字在固定 2 Mbps CBR、GOP=8 下会占用额外编码码率；板端
-  实际流已接近 2 Mbps 目标上限，背景细节可能因此下降。现已支持通过配置关闭标签或调整
-  码率；后续仍应做同场景 A/B 抓帧并评估标签样式、GOP 或码率，不应仅凭主观观感调整。
-- V4L2设置参数后没有校验驱动实际协商的分辨率和帧率。
-- 部分RKNN、MPP和RTMP关键调用缺少返回值检查。
 - README存在配置示例和实现细节不一致。
 - CMake硬编码 `/home/rambos/sysroot`，声明的 `RKNN_LIB_PATH` 当前没有用于实际链接。
 - 交叉编译工具链文件实际名称是`cmake/aarch64-toolchain.cmake`；旧文档中的
@@ -142,6 +153,4 @@ V4L2摄像头采集
 
 ## 下一步
 
-将摄像头对准包含六类目标的固定桌面场景，固定画面内容后重复文字开启/关闭及
-2/3 Mbps A/B，并完成20～50帧检测框人工对照。正式替换生产模型前建立固定标注集，
-统一评估Precision、Recall和mAP；上述验证通过前保持生产配置`output_layout=decoded`。
+按照推理优化路线，进入下一优化阶段：将模型输入尺寸从 640x640 改为匹配摄像头比例的 640x480 并建立对应校准、转换与后处理映射，重新在 Host 仿真评估其精度与推理效率表现。

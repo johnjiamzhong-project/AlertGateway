@@ -1,0 +1,662 @@
+{
+  "det_A_01_2.0s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_02_2.5s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_03_3.0s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_04_3.5s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_05_4.0s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_06_4.5s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_07_5.0s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_08_5.5s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_09_6.0s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_10_6.5s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_11_7.0s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_12_7.5s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_13_8.0s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_14_8.5s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_15_9.0s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_16_9.5s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_17_10.0s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_18_10.5s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_19_11.0s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_20_11.5s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_21_12.0s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_22_12.5s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_23_13.0s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_24_13.5s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_25_14.0s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_26_14.5s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_27_15.0s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_28_15.5s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_29_16.0s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ],
+  "det_A_30_16.5s.jpg": [
+    {
+      "class_id": 63,
+      "label": "laptop",
+      "box": [
+        424,
+        25,
+        638,
+        475
+      ]
+    },
+    {
+      "class_id": 41,
+      "label": "cup",
+      "box": [
+        55,
+        395,
+        188,
+        480
+      ]
+    }
+  ]
+}

@@ -7,9 +7,31 @@
 #include <unistd.h>
 #include <cstring>
 #include <cerrno>
+#include <cmath>
 #include <stdexcept>
 #include <chrono>
 #include <iostream>
+#include <iomanip>
+
+namespace {
+
+std::string fourcc_to_string(uint32_t fourcc) {
+    char value[5] = {
+        static_cast<char>(fourcc & 0xff),
+        static_cast<char>((fourcc >> 8) & 0xff),
+        static_cast<char>((fourcc >> 16) & 0xff),
+        static_cast<char>((fourcc >> 24) & 0xff),
+        '\0'
+    };
+    return value;
+}
+
+double fps_from_timeperframe(const v4l2_fract& tpf) {
+    if (tpf.numerator == 0 || tpf.denominator == 0) return 0.0;
+    return static_cast<double>(tpf.denominator) / tpf.numerator;
+}
+
+}  // namespace
 
 CaptureThread::CaptureThread(const CameraConfig& cfg,
                              BlockingQueue<Frame>& enc_queue,
@@ -83,8 +105,8 @@ bool CaptureThread::open_device() {
     fd_ = open(cfg_.device.c_str(), O_RDWR | O_NONBLOCK);
     if (fd_ == -1) return false;
 
-    // 设置采集格式：分辨率 + YUYV422 像素格式
-    // 注意：驱动可能将参数调整到摄像头实际支持的最近档位，不会报错但会静默修改
+    // 设置采集格式：分辨率 + YUYV422 像素格式。
+    // VIDIOC_S_FMT 是请求，驱动可能改写为实际支持的档位，所以设置后必须回读校验。
     struct v4l2_format fmt;
     memset(&fmt, 0, sizeof(fmt));
     fmt.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -94,14 +116,80 @@ bool CaptureThread::open_device() {
     fmt.fmt.pix.field       = V4L2_FIELD_INTERLACED;
     if (ioctl(fd_, VIDIOC_S_FMT, &fmt) == -1) { close(fd_); fd_ = -1; return false; }
 
-    // 设置帧率（同样是"请求"，驱动可能不支持时会忽略）
-    // fps 必须与摄像头实际输出帧率一致，否则 PTS 节奏错乱导致延迟异常（见 BUG-006）
+    struct v4l2_format actual_fmt;
+    memset(&actual_fmt, 0, sizeof(actual_fmt));
+    actual_fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(fd_, VIDIOC_G_FMT, &actual_fmt) == -1) {
+        std::cerr << "VIDIOC_G_FMT failed after VIDIOC_S_FMT: "
+                  << strerror(errno) << "\n";
+        close(fd_); fd_ = -1; return false;
+    }
+
+    const auto& pix = actual_fmt.fmt.pix;
+    std::cout << "V4L2 format negotiated: "
+              << pix.width << "x" << pix.height
+              << " fourcc=" << fourcc_to_string(pix.pixelformat)
+              << " bytesperline=" << pix.bytesperline
+              << " sizeimage=" << pix.sizeimage << "\n" << std::flush;
+
+    if (pix.pixelformat != V4L2_PIX_FMT_YUYV) {
+        std::cerr << "Unsupported V4L2 pixel format: "
+                  << fourcc_to_string(pix.pixelformat)
+                  << " (expected YUYV)\n";
+        close(fd_); fd_ = -1; return false;
+    }
+    if (static_cast<int>(pix.width) != cfg_.width ||
+        static_cast<int>(pix.height) != cfg_.height) {
+        std::cerr << "V4L2 resolution mismatch: requested "
+                  << cfg_.width << "x" << cfg_.height
+                  << ", got " << pix.width << "x" << pix.height << "\n";
+        close(fd_); fd_ = -1; return false;
+    }
+    uint32_t expected_bytesperline = pix.width * 2;
+    if (pix.bytesperline != 0 && pix.bytesperline != expected_bytesperline) {
+        std::cerr << "Unsupported V4L2 bytesperline: got "
+                  << pix.bytesperline << ", expected "
+                  << expected_bytesperline << " for packed YUYV\n";
+        close(fd_); fd_ = -1; return false;
+    }
+
+    // 设置帧率（同样是请求，驱动可能不支持时会改写或忽略）。
+    // fps 必须与摄像头实际输出帧率尽量一致，否则 PTS 节奏错乱导致延迟异常（见 BUG-006）。
     struct v4l2_streamparm parm;
     memset(&parm, 0, sizeof(parm));
     parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     parm.parm.capture.timeperframe.numerator   = 1;
     parm.parm.capture.timeperframe.denominator = cfg_.fps;
-    ioctl(fd_, VIDIOC_S_PARM, &parm);
+    if (ioctl(fd_, VIDIOC_S_PARM, &parm) == -1) {
+        std::cerr << "VIDIOC_S_PARM failed: " << strerror(errno)
+                  << " (continuing with driver default fps)\n";
+    }
+
+    struct v4l2_streamparm actual_parm;
+    memset(&actual_parm, 0, sizeof(actual_parm));
+    actual_parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(fd_, VIDIOC_G_PARM, &actual_parm) == -1) {
+        std::cerr << "VIDIOC_G_PARM failed after VIDIOC_S_PARM: "
+                  << strerror(errno) << "\n";
+    } else {
+        const auto& tpf = actual_parm.parm.capture.timeperframe;
+        double actual_fps = fps_from_timeperframe(tpf);
+        std::ios::fmtflags old_flags = std::cout.flags();
+        std::streamsize old_precision = std::cout.precision();
+        std::cout << "V4L2 fps negotiated: "
+                  << tpf.denominator << "/" << tpf.numerator
+                  << " (" << std::fixed << std::setprecision(3)
+                  << actual_fps << " fps), requested "
+                  << cfg_.fps << " fps\n" << std::flush;
+        std::cout.flags(old_flags);
+        std::cout.precision(old_precision);
+
+        if (actual_fps > 0.0 && std::abs(actual_fps - cfg_.fps) > 0.5) {
+            std::cerr << "V4L2 fps differs from config by more than 0.5 fps; "
+                      << "encoded PTS still uses configured fps="
+                      << cfg_.fps << "\n";
+        }
+    }
 
     return true;
 }
