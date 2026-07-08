@@ -29,7 +29,7 @@ V4L2摄像头采集
 
 ## 当前已确认状态
 
-- Git分支：`master`，本地已提交 `b190edb`，当前领先 `origin/master` 1 个提交。
+- Git分支：`master`，本地已提交 `38902cb`，当前领先 `origin/master` 2 个提交。
 - 工作区存在用户自己的未提交修改和未跟踪文档，处理任务时必须保留，不能覆盖或清理。
 - 本地已有ARM64构建产物 `build/AlertGateway`。
 - 仓库内 `model/` 只有 `.gitkeep`；实际运行所需的 `model/yolov8s.rknn` 未纳入Git。
