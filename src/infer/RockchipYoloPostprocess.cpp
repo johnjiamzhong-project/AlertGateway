@@ -8,7 +8,15 @@
 
 namespace {
 
-constexpr int kClasses = 80;
+constexpr int kCocoClasses = 80;
+constexpr int kDesktopClasses = 6;
+constexpr const char* kDesktopLabels[kDesktopClasses] = {
+    "cell phone", "cup", "keyboard", "mouse", "laptop", "book"
+};
+
+bool supported_class_count(int count) {
+    return count == kCocoClasses || count == kDesktopClasses;
+}
 constexpr int kBranches = 3;
 constexpr int kOutputsPerBranch = 3;
 constexpr int kExpectedOutputs = kBranches * kOutputsPerBranch;
@@ -86,7 +94,8 @@ bool RockchipYoloPostprocess::validate(
             dfl_values % 4 != 0 || dfl_values > kMaxDflValues)
             return fail_validation(error, "branch " + std::to_string(branch) +
                                               " has invalid DFL shape");
-        if (score.dims[1] != kClasses || score.dims[2] != box.dims[2] ||
+        if (!supported_class_count(static_cast<int>(score.dims[1])) ||
+            score.dims[2] != box.dims[2] ||
             score.dims[3] != box.dims[3] || sum.dims[1] != 1 ||
             sum.dims[2] != box.dims[2] || sum.dims[3] != box.dims[3])
             return fail_validation(error, "branch " + std::to_string(branch) +
@@ -112,8 +121,12 @@ std::vector<Detection> RockchipYoloPostprocess::process(
     if (!validate(attrs, model_width, model_height, &error))
         throw std::runtime_error("Rockchip postprocess: " + error);
 
-    float scale_x = static_cast<float>(orig_width) / model_width;
-    float scale_y = static_cast<float>(orig_height) / model_height;
+    float scale = std::min(static_cast<float>(model_width) / orig_width,
+                           static_cast<float>(model_height) / orig_height);
+    int resized_width = static_cast<int>(std::round(orig_width * scale));
+    int resized_height = static_cast<int>(std::round(orig_height * scale));
+    float pad_x = static_cast<float>((model_width - resized_width) / 2);
+    float pad_y = static_cast<float>((model_height - resized_height) / 2);
     std::vector<Detection> candidates;
     candidates.reserve(64);
 
@@ -124,6 +137,7 @@ std::vector<Detection> RockchipYoloPostprocess::process(
         const auto& box_attr = attrs[box_index];
         const auto& score_attr = attrs[score_index];
         const auto& sum_attr = attrs[sum_index];
+        int num_classes = static_cast<int>(score_attr.dims[1]);
 
         int grid_h = static_cast<int>(box_attr.dims[2]);
         int grid_w = static_cast<int>(box_attr.dims[3]);
@@ -139,23 +153,47 @@ std::vector<Detection> RockchipYoloPostprocess::process(
         int8_t score_threshold = quantize_i8(cfg_.conf_threshold, score_attr);
         int8_t sum_threshold = quantize_i8(cfg_.conf_threshold, sum_attr);
 
+        // Preallocate best scores and classes buffers to avoid heap allocations in 640x640 case
+        std::vector<int8_t> best_scores_buf;
+        std::vector<int16_t> best_classes_buf;
+        int8_t* best_scores;
+        int16_t* best_classes;
+        int8_t local_scores[6400];
+        int16_t local_classes[6400];
+        if (grid_len <= 6400) {
+            best_scores = local_scores;
+            best_classes = local_classes;
+        } else {
+            best_scores_buf.assign(grid_len, -128);
+            best_classes_buf.assign(grid_len, -1);
+            best_scores = best_scores_buf.data();
+            best_classes = best_classes_buf.data();
+        }
+        std::fill_n(best_scores, grid_len, -128);
+        std::fill_n(best_classes, grid_len, -1);
+
+        // Restructured loops: loop over class_id on the outer level to make memory access 100% sequential
+        for (int class_id = 0; class_id < num_classes; ++class_id) {
+            const int8_t* class_scores = score_tensor + class_id * grid_len;
+            for (int cell = 0; cell < grid_len; ++cell) {
+                if (sum_tensor[cell] < sum_threshold) continue;
+                int8_t score = class_scores[cell];
+                if (score > score_threshold && score > best_scores[cell]) {
+                    best_scores[cell] = score;
+                    best_classes[cell] = class_id;
+                }
+            }
+        }
+
+        // Loop over cells sequentially to construct candidates
         for (int row = 0; row < grid_h; ++row) {
             for (int col = 0; col < grid_w; ++col) {
                 int cell = row * grid_w + col;
-                if (sum_tensor[cell] < sum_threshold) continue;
-
-                int best_class = -1;
-                int8_t best_score = -128;
-                for (int class_id = 0; class_id < kClasses; ++class_id) {
-                    int8_t score = score_tensor[class_id * grid_len + cell];
-                    if (score > score_threshold && score > best_score) {
-                        best_score = score;
-                        best_class = class_id;
-                    }
-                }
+                int best_class = best_classes[cell];
                 if (best_class < 0) continue;
 
-                const char* label = COCO_LABELS[best_class];
+                const char* label = num_classes == kDesktopClasses
+                    ? kDesktopLabels[best_class] : COCO_LABELS[best_class];
                 if (!target_set_.empty() &&
                     target_set_.find(label) == target_set_.end())
                     continue;
@@ -168,13 +206,17 @@ std::vector<Detection> RockchipYoloPostprocess::process(
                 compute_dfl(dfl_logits.data(), dfl_len, distances);
 
                 Detection det;
-                det.x1 = (col + 0.5f - distances[0]) * stride * scale_x;
-                det.y1 = (row + 0.5f - distances[1]) * stride * scale_y;
-                det.x2 = (col + 0.5f + distances[2]) * stride * scale_x;
-                det.y2 = (row + 0.5f + distances[3]) * stride * scale_y;
+                det.x1 = ((col + 0.5f - distances[0]) * stride - pad_x) / scale;
+                det.y1 = ((row + 0.5f - distances[1]) * stride - pad_y) / scale;
+                det.x2 = ((col + 0.5f + distances[2]) * stride - pad_x) / scale;
+                det.y2 = ((row + 0.5f + distances[3]) * stride - pad_y) / scale;
+                det.x1 = std::clamp(det.x1, 0.0f, static_cast<float>(orig_width));
+                det.y1 = std::clamp(det.y1, 0.0f, static_cast<float>(orig_height));
+                det.x2 = std::clamp(det.x2, 0.0f, static_cast<float>(orig_width));
+                det.y2 = std::clamp(det.y2, 0.0f, static_cast<float>(orig_height));
                 det.class_id = best_class;
                 det.label = label;
-                det.score = dequantize(best_score, score_attr);
+                det.score = dequantize(best_scores[cell], score_attr);
                 candidates.push_back(std::move(det));
             }
         }

@@ -957,7 +957,7 @@ SRS在运行期间累计接收视频数据并报告递增帧数。Windows端FFmp
 
 ### 目的
 
-通过固定的测试集（COCO 20张子集 + 30帧真实桌面场景图片）建立精度基准，利用 Host 本地 RKNN Simulator 模拟器环境量化计算 Precision, Recall 和 mAP@0.5 指标，横向对比生产 `decoded` 双输出模型和优化后 `rockchip_dfl` 九输出模型的精度差异，提供是否允许正式切换生产配置的精度支撑数据。
+通过固定的测试集（COCO 20张子集 + 从桌面测试视频抽取的30帧固定图片）建立精度基准，利用 Host 本地 RKNN Simulator 模拟器环境量化计算 Precision, Recall 和 mAP@0.5 指标，横向对比生产 `decoded` 双输出模型和优化后 `rockchip_dfl` 九输出模型的精度差异，提供是否允许正式切换生产配置的精度支撑数据。
 
 ### 测试条件
 
@@ -966,7 +966,7 @@ SRS在运行期间累计接收视频数据并报告递增帧数。Windows端FFmp
 - 评估算法：统一对齐 C++ 端生产后处理，IoU 阈值 = 0.50，置信度阈值 = 0.25，NMS 阈值 = 0.45。
 - 测试数据集：
   1. COCO 子集：`rknn_model_zoo` 自带的 20 张验证集图片（GT 从官方 `instances_val2017.json` 自动解析并过滤得到）；
-  2. 真实场景验证集：`ab_test_A.flv` 抽取的 30 帧桌面帧（GT 手动建立，Dell 显示器标注为 `laptop`，易拉罐标注为 `cup`）。
+  2. 桌面抽帧验证集：`ab_test_A.flv` 抽取的 30 帧固定图片（GT 手动建立，Dell 显示器标注为 `laptop`，易拉罐标注为 `cup`）。该数据集用于离线固定图片评估，不等同于实时摄像头现场复测。
 
 ### 量化结果对比
 
@@ -1004,7 +1004,7 @@ SRS在运行期间累计接收视频数据并报告递增帧数。Windows端FFmp
 
 ### 结果分析
 
-1. **精度高度对齐，无任何精度退化**：在 COCO 20张子集和 30帧桌面真实场景上，两款模型的整体 `mAP@0.5` 均完全一致（分别为 `60.16%` 和 `48.33%`），在所有评测类别上的召回率（Recall）保持了 100% 对齐。
+1. **精度高度对齐，无任何精度退化**：在 COCO 20张子集和 30帧桌面抽帧固定图片上，两款模型的整体 `mAP@0.5` 均完全一致（分别为 `60.16%` 和 `48.33%`），在所有评测类别上的召回率（Recall）保持了 100% 对齐。
 2. **部分类别表现更佳**：在 COCO 子集的部分重合类别上（如 `cup` 和 `laptop`），`rockchip_dfl` 的 Precision 分别从 `66.67% -> 100.00%`，`57.14% -> 66.67%`，展现了在过滤边缘低置信度框方面微弱的指标优势。
 3. **真实场景表现说明**：
    - 戴尔显示器（标注为 `laptop`）取得了 96.67% 的 Recall 与 100% 的 Precision，符合单帧手遮挡被短时间漏检的实际情况；
@@ -1206,18 +1206,18 @@ Model input: 640x480
 对比 EXP-006 的 640x640 `rockchip_dfl` 基线：
 
 - COCO 子集：`60.16% -> 68.15%`，指标上升；
-- 桌面场景：`48.33% -> 8.33%`，严重退化；
+- 桌面抽帧验证集：`48.33% -> 8.33%`，严重退化；
 - 桌面 laptop Recall：`96.67% -> 16.67%`，严重退化；
 - 桌面 cup 仍为 `0.00%`，没有改善。
 
 ### 结论
 
 本轮 640x480 候选模型虽然可以完成 ONNX Runtime 验证、RKNN INT8 转换和 Simulator
-推理，但桌面真实场景精度明显不可接受，不能进入生产 C++ 尺寸放开和板端 smoke 阶段。
+推理，但桌面抽帧固定图片验证集精度明显不可接受，不能进入生产 C++ 尺寸放开和板端实时摄像头 smoke 阶段。
 
 关键原因判断：当前 ONNX 是由 640x640 官方九输出模型修改静态输入/输出形状得到的候选，
 不是从训练/导出流程原生导出的 640x480 官方优化模型。它能跑通并产出正确网格形状，
-但不能证明模型在业务桌面场景上的检测质量可用。
+但不能证明模型在业务桌面抽帧验证集上的检测质量可用。
 
 ### 原生导出 ONNX 复测
 
@@ -1273,7 +1273,7 @@ Model input: 640x480
 1. 暂停所有 640x480 候选进入生产，不修改 `InferThread` 矩形输入限制。
 2. 不再继续重复 640x480 ONNX/RKNN 转换，除非验证集或训练/微调策略发生变化。
 3. 优先评估更接近当前 640x640 分布的输入尺寸候选，或进入桌面六类数据扩充与微调。
-4. 在任一新候选进入生产前，必须先达到桌面场景 mAP 不低于当前 640x640 `rockchip_dfl` 基线的可接受范围。
+4. 在任一新候选进入生产前，必须先达到桌面抽帧验证集 mAP 不低于当前 640x640 `rockchip_dfl` 基线的可接受范围。
 
 ## EXP-008 576x448 与 512x384 输入尺寸候选验证
 
@@ -1307,7 +1307,7 @@ ONNX 输出网格检查：
 ### Simulator 精度结果
 
 命令口径：`model-mode=rockchip_dfl`，`conf_threshold=0.25`，`nms_threshold=0.45`，
-`eval_iou_threshold=0.50`，同一套 COCO 20 张子集与桌面 30 帧验证集。
+`eval_iou_threshold=0.50`，同一套 COCO 20 张子集与桌面 30 帧抽帧固定图片验证集。
 
 ```text
 Model input: 576x448
@@ -1357,7 +1357,7 @@ Model input: 512x384
 
 与 640x640 `rockchip_dfl` 基线相比，两个更小尺寸均未达到可接受精度：
 
-- 桌面场景 mAP 基线为 `48.33%`，576x448 降至 `13.33%`，512x384 降至 `5.00%`；
+- 桌面抽帧验证集 mAP 基线为 `48.33%`，576x448 降至 `13.33%`，512x384 降至 `5.00%`；
 - 桌面 laptop Recall 基线为 `96.67%`，576x448 降至 `26.67%`，512x384 降至 `10.00%`；
 - 桌面 cup 仍为 `0.00%`，没有改善。
 
@@ -1369,3 +1369,362 @@ Model input: 512x384
 1. 暂停当前 YOLOv8s 官方九输出模型的输入尺寸继续缩小实验。
 2. 下一步转向桌面六类数据扩充与微调，先恢复/提升桌面验证集精度，再考虑压缩或缩小输入。
 3. 若未来重新尝试小尺寸，应基于微调后的业务模型，而不是直接缩放当前 COCO 权重。
+## EXP-009 候选板端 Smoke 与训练入口修复（2026-07-10）
+
+### 目标
+
+验证新六类九输出 INT8 RKNN 能否在 RK3588 真实采集链路启动，并修复后续训练入口误用旧定制 Ultralytics 的风险。
+
+### 环境与候选产物
+
+- 板端：Firefly RK3588，`192.168.0.200`，RKNN API 2.3.0，Driver 0.9.8。
+- 候选目录：`~/AlertGateway/candidate_20260710/`，不覆盖现有生产目录。
+- 候选模型：`yolov8s_desktop6_final_int8_desktop_calib.rknn`，六类、Rockchip 九输出。
+- 候选程序：重新交叉编译的 `AlertGateway` 与 `infer_camera_smoke`。
+
+### 结果
+
+候选程序启动后完成：
+
+- `rknn_init OK (SRAM)`；
+- 9 输出布局校验通过；
+- 六类输出通道校验通过；
+- zero-copy 输入内存绑定成功。
+
+完整 Smoke 在摄像头打开阶段停止：候选配置使用的 `/dev/video20` 在板端不存在。板端现有 ISP 节点包括 `/dev/video11`，其支持 UYVY/NV12，不支持当前 CaptureThread 要求的 YUYV。因此本次未将摄像头节点强行改写，也未修改生产配置。
+
+### 训练入口修复
+
+`tools/dataset/train_desktop6.py` 已改为默认使用现代已安装 Ultralytics；传入旧 `--ultralytics-dir` 会直接拒绝。Rockchip 导出改成可选的独立进程，避免训练环境再次加载会产生 NaN 的旧定制版本。已通过 `py_compile` 与 `--help` 验证。
+
+### 结论与后续
+
+本次证明新六类 RKNN 模型和 C++ 后处理可以完成加载，但真实采集链路尚未完成验证。下一步需恢复正确的 YUYV 节点，或为 CaptureThread 增加 UYVY/NV12 支持并重新编译 Smoke；摄像头链路通过后，再进入 0.375 宽度模型微调。
+
+
+## EXP-010 多平面 UYVY 采集适配（2026-07-10）
+
+- 设计选择：板端 /dev/video11 的多平面 UYVY 在 CaptureThread 边界转换为内部 YUYV，保持后续编码和推理接口不变。
+- 代码已完成 V4L2 mplane 协商、单 plane mmap、DQBUF/QBUF 和 UYVY→YUYV 字节转换；AlertGateway、infer_camera_smoke、rknn_benchmark 全部交叉编译通过。
+- 候选板端测试中成功协商 640x480 UYVY bytesperline=1280，但 VIDIOC_STREAMON 返回 EPERM；板端 v4l2-ctl 独立测试同样失败，media-ctl 显示 ISP 传感器输入链路未启用。
+- 结论：本轮代码适配完成，完整 Smoke 等待板端 ISP/摄像头源恢复后继续；不需要重新录制视频。
+
+## EXP-011 ISP 拓扑阻塞定位（2026-07-10）
+
+- 只读检查 /dev/media0：CSI2/DPHY 与 rkcif 节点存在，但拓扑中没有摄像头 sensor 实体。
+- /dev/video11 的格式协商、QBUF 通过，STREAMON 返回 EPERM；v4l2-ctl 独立采集同样失败。
+- 结论：完整 Smoke 当前等待摄像头物理接入/驱动恢复；无需继续修改 UYVY 适配代码，也无需重新录制视频。
+
+
+## EXP-012 0.375 宽度模型配置准备（2026-07-10）
+
+- 新增 	ools/dataset/yolov8d375_desktop6.yaml，参数为 depth=0.33、width=0.375、nc=6。
+- 使用 Ultralytics 8.4.67 构建并加载现有 best.pt 成功；未开始长时间训练。
+- 注意：文件名含 yolov8s 会触发 Ultralytics 自动选择 s scale，因此训练入口应使用 d375 文件。
+- 下一步：固定 final train/val/test 做短跑微调和独立评估。
+
+
+## EXP-013 0.375 short run (2026-07-10)
+
+- Run: yolov8d375_desktop6_smoke_5e_20260710; 640 input, batch 8, AMP off, 5 epochs.
+- Result: val mAP50=16.6%, mAP50-95=7.13%; weight transfer and training path passed.
+- Conclusion: not a selection result; run 30 epoch fine-tuning and independent test next.
+
+
+## EXP-014 0.375 完整微调结论（2026-07-10）
+
+- 30 epoch 结果：val mAP50=54.3%。
+- 固定 test：mAP50=42.3%、mAP50-95=28.1%。
+- 对比基线 test mAP50=77.2%，0.375 候选淘汰，不进入后续结构优化。
+
+
+## EXP-015 当前路线状态同步（2026-07-10）
+
+- 当前生产候选仍为六类 YOLOv8s 基线：桌面 test mAP50=77.2%；INT8 RKNN letterbox 仿真 mAP50=56.08%，未观察到明显量化损失。
+- 0.375 宽度模型已完成 30 epoch 微调，但 test mAP50=42.3%，已淘汰，不再作为后续结构优化起点。
+- 后续实验统一按以下顺序：RKNN profiling → 算子融合与通道对齐验证 → 结构化剪枝 → 必要时模块替换 → 蒸馏恢复精度 → ONNX/RKNN/板端复测。
+- 算子融合和通道填充只有在 profiling 发现未融合算子、CPU fallback、内存搬运或通道对齐热点时才实施；不能仅凭参数量推断 NPU 一定加速。
+- 板端完整摄像头 Smoke 仍受 ISP sensor 输入链路阻塞，模型加载和交叉编译验证已通过。
+
+
+## EXP-016 RK3588 基线总耗时 profiling（2026-07-10）
+
+- 条件：六类 9 输出 RKNN、RK3588、warmup=50、runs=300、zero-copy、auto core。
+- rknn_run：mean 50.707 ms，P90 53.032 ms；outputs_get：4.276 ms；postprocess：0.451 ms；input copy：0.788 ms。
+- 结论：主要瓶颈是 NPU 图执行；后处理和输入链路不是当前首要优化点。当前 benchmark 提供 RKNN_QUERY_PERF_RUN 总耗时，尚未取得逐层 PERF_DETAIL。
+
+
+## EXP-017 通道对齐与剪枝准备（2026-07-10）
+
+- 基线 RKNN 输出包含 64/32/16 等对齐通道，暂无额外 padding 的必要证据。
+- rknn-env 未安装 torch_pruning/nni；后续需采用可控模型手术方案，优先低比例、可回滚的结构化剪枝。
+
+
+## EXP-018 剪枝前通道重要性分析（2026-07-10）
+
+- 对 baseline 的 57 个 Conv+BN 层计算 BN gamma 均值，生成 baseline_channel_importance.txt。
+- 低重要性候选主要位于 model.15.cv1/cv2、model.4 内部层；尚未执行裁剪。
+- 原因：C2f/Concat/Detect 存在通道依赖，下一步必须做依赖感知裁剪并保持可回滚。
+
+
+- 通道重要性报告已归档至项目：docs/artifacts/baseline_channel_importance.txt。
+
+
+## EXP-019 结构化剪枝计划（2026-07-10）
+
+- 计划文件：docs/artifacts/structured_pruning_plan.json。
+- 首轮候选 5 个 C2f 相关层，目标剪枝比例 10%，通道数按 16 对齐。
+- 尚未修改模型；先完成依赖感知手术实现，再进行微调和 RKNN 复测。
+
+
+## EXP-020 torch-pruning 兼容性检查（2026-07-10）
+
+- torch-pruning 1.6.1 安装成功。
+- 默认 DependencyGraph 无法识别 YOLOv8 C2f 内部目标卷积，当前不执行实际裁剪。
+- 下一步为自定义 forward/依赖映射适配，确保 C2f、Concat、Detect 连接安全。
+
+
+## EXP-021 显式层依赖表（2026-07-10）
+
+- 已归档 docs/artifacts/yolov8s_layer_dependency.tsv。
+- 表中记录 23 个顶层模块及其 from 连接、类型和参数量，为后续手写剪枝映射提供依据。
+
+
+## EXP-022 基线与 0.375 结构核对（2026-07-10）
+
+- 基线主干通道：32/64/128/256/512；0.375 候选：24/48/96/192/384。
+- 两者并非同一结构的轻微训练差异；后续剪枝目标固定为基线模型。
+
+
+## EXP-023 ONNX 算子融合检查（2026-07-10）
+
+- 基线 ONNX：226 节点，Conv=63，BatchNormalization=0，Sigmoid=59，Mul=56，Concat=13。
+- 结论：Conv+BN 已融合；SiLU 仍表现为 Sigmoid+Mul，是否需要替换必须由板端 profiling 决定。
+
+
+## EXP-024 激活模块替换方案（2026-07-10）
+
+- 方案文件：docs/artifacts/activation_replacement_plan.json。
+- 候选：SiLU（Sigmoid+Mul）→ReLU6；需在 profiling 确认热点后实施。
+- 当前未修改模型，保留基线可回滚。
+
+
+## EXP-025 蒸馏方案（2026-07-10）
+
+- 方案文件：docs/artifacts/distillation_plan.json。
+- Teacher 为六类 YOLOv8s baseline，Student 为后续结构化剪枝模型；包含 box、分类和 P3/P4/P5 特征蒸馏。
+- 当前仅完成方案，待学生模型结构验证后训练。
+
+
+## EXP-026 C2f 内部依赖明细（2026-07-10）
+
+- 已归档 docs/artifacts/yolov8s_c2f_internal.tsv，共 57 行内部层信息。
+- 下一步据此实现 C2f 分支一致的通道裁剪。
+
+
+## EXP-027 任务状态总览（2026-07-10）
+
+- 当前可靠基线：六类 YOLOv8s，test mAP50=77.2%；RK3588 rknn_run=50.707 ms avg。
+- 0.375 宽度候选 test mAP50=42.3%，已淘汰。
+- 当前未改 baseline 权重，主要阻塞为 torch-pruning 对 C2f/Concat/Detect 依赖追踪失败。
+- 目标：手工重建约 10% 剪枝模型，精度保持在 baseline -3 个百分点以内，NPU 延迟低于 50.707 ms。
+
+
+## EXP-028 手工 10% 通道缩减（2026-07-11）
+
+- 结构：32/64/112/224/448 通道，参数约 9.51M；baseline 约 11.14M。
+- 训练：1 epoch smoke 和 30 epoch 微调均通过。
+- 结果：val mAP50=58.6%；test mAP50=64.0%、mAP50-95=42.8%。
+- 结论：精度下降超过验收阈值，候选淘汰，不做 RKNN 导出。
+
+
+## EXP-029 5% 候选配置检查（2026-07-11）
+
+- 初版 5% YAML 实际参数约 7.92M，较 baseline 11.14M 减少约 29%，配置不符合目标。
+- 未训练，需先修正模型参数映射。
+
+
+## EXP-030 低比例通道缩减（2026-07-11）
+
+- 结构参数约 10.734M，较 baseline 减少约 3.6%；smoke、30 epoch 微调通过。
+- val mAP50=59.3%；test mAP50=58.5%、mAP50-95=38.2%。
+- 结论：仍低于 baseline test mAP50=77.2%，候选淘汰，不导出 RKNN；后续改走蒸馏/模块级小改。
+
+
+## EXP-031 ReLU6 模块替换（2026-07-11）
+
+- ReLU6 结构 1 epoch smoke 和 30 epoch 微调通过。
+- val mAP50=63.2%；test mAP50=65.6%、mAP50-95=50.2%。
+- 结论：低于 baseline test mAP50=77.2%，候选淘汰，不做 RKNN 导出。
+
+
+## EXP-032 蒸馏计划登记（2026-07-11）
+
+- distill_desktop6.py 尚未实现或运行。
+- 执行顺序：实现入口 → 1 epoch smoke → 30 epoch → test → 达标后 ONNX/RKNN → RK3588 profiling。
+- test mAP50 验收线为 74.2%，不达标则保留原 YOLOv8s baseline。
+
+## EXP-033 蒸馏候选最终结果（2026-07-11）
+
+- 已完成 Teacher/Student smoke、训练/resume、checkpoint reload 和固定 test 评估。
+- distilled pruned candidate test mAP50=56.82%，低于 baseline 77.18% 和 74.2% 门禁。
+- 该候选淘汰，不导出 ONNX/RKNN，不上板。
+
+
+## EXP-034 baseline 板端 Smoke（2026-07-11）
+
+- ISP 已恢复，/dev/video20 成功协商 YUYV 640x480、15 FPS。
+- baseline rockchip_dfl RKNN 成功加载：9 outputs、zero-copy、RKNN API 2.3.0、driver 0.9.8。
+- 生产路径 Smoke、正检和 H.264 FLV 编码均通过；正检日志出现 objs:1-2。
+- MQTT 本轮按要求跳过。
+
+
+## EXP-035 性能 governor 优化（2026-07-11）
+
+- 部署并启用 rockchip-performance.service，锁定 CPU/NPU/DDR performance，关闭 CPUIdle state1。
+- 生产路径中 rknn_run 稳定约 26.7 ms，总推理约 34 ms。
+- 5 分钟长稳运行正常，温度最高约 37.9 C，无降频、崩溃或异常退出。
+
+
+## EXP-036 RKNN 生产热点 benchmark（2026-07-11）
+
+- 条件：性能服务 active、zero-copy、SRAM、all NPU cores、50 warmup、300 runs。
+- rknn_run median=26.540 ms，P90=26.617 ms。
+- outputs_get median=1.723 ms，P90=1.750 ms。
+- Rockchip postprocess median=4.126 ms，P90=4.194 ms。
+- 完整 run_get_post median=32.395 ms，P90=32.534 ms。
+- 当前下一步热点是 CPU 输出处理和后处理合计约 5.8 ms；NPU 网络本身仍是主要耗时。
+
+
+## EXP-037 图级候选和当前结论（2026-07-11）
+
+- RKNN optimization_level=0/1/2/3 已对比，差异约 0.04%，无实际收益。
+- ONNX 已确认 Conv+BN 融合；SiLU 仍表示为 Sigmoid+Mul，尚未做手工替换。
+- 六类 native RKNN 重建候选固定 test mAP50=56.08%，淘汰，不上板。
+- 手工通道填充、Concat 重排和激活子图替换尚未完成，必须先做 A/B 精度和板端耗时验证。
+- 当前 baseline、板端性能优化和稳定性验证完成；真正的手工图优化仍未完成。
+
+## EXP-038：RKNN 逐算子图级 profiling
+
+- 条件：部署九输出 YOLOv8s RKNN，API 2.3.0，all cores，SRAM，zero-copy，warmup=1，runs=1；性能采集模式只用于定位，不纳入常规基线。
+- 结果：总算子时间 25.874 ms；ConvExSwish 22.222 ms（85.89%），Concat 1.275 ms（4.93%），Split 0.810 ms（3.13%），ConvSigmoid 0.507 ms（1.96%），Resize 0.352 ms（1.36%）。
+- 结论：SiLU 已融合，通道已对齐；Concat 可见但不是值得手写等价重排的热点。没有部署模型变更。
+## EXP-039：80x80 C2f 单重复块缩减
+
+- 结构：仅将 backbone 的 80x80 C2f 内部重复从 2 减至 1；参数 11.046M，计算量 27.4 GFLOPs，相比 baseline 28.6 GFLOPs。
+- 训练：从 baseline best.pt 部分迁移，30 epoch 完成；val mAP50=66.9%。
+- 固定 test：mAP50=66.44%，mAP50-95=54.57%；cell phone/cup/keyboard/mouse/laptop/book AP50 分别为 63.95/86.13/68.15/31.69/58.32/90.38%。
+- 结论：未达到 mAP50 74.18% 门槛，淘汰；不导出 ONNX/RKNN，不进行板端测试。
+## EXP-040：INT8 DFL 解码微优化
+
+- 做法：直接在 INT8 DFL 张量上计算 softmax 差值，移除每候选的 float 临时数组；候选筛选和 NMS 未改变。
+- 首轮存在同时影响 rknn_run 与 outputs_get 的冷启动状态，不采信。交错热态 300-run A/B 后，baseline/候选后处理中位数约为 4.15/4.00 ms，落在运行波动内；完整链路仍约 32.4-32.5 ms。
+- 结论：无稳定收益，代码已撤回，不进入部署。
+## EXP-041：outputs_get 预分配 buffer
+
+- Benchmark-only caller-owned raw output buffers were compared with the original outputs_get path using interleaved 300-run tests. Synthetic deterministic input: outputs_get median about 1.73 -> 1.17 ms; complete run_get_post about 32.53 -> 31.77 ms. Same-input detection count was 0 for both paths.
+- The mechanism was connected only in an isolated production binary and run with the restored ISP/config. Initialization, inference, encoding, and graceful shutdown succeeded, but real tail samples were baseline 29.26-29.37 ms versus candidate 29.30-29.48 ms.
+- Conclusion: synthetic gain did not transfer to the real production scene; production change reverted. Benchmark switch remains available for a future positive-detection scene.
+## EXP-042：真实桌面图输出预分配复核
+
+- 输入：固定 test 集真实桌面图 letterbox 到 640x640，板端 RKNN zero-copy，默认 outputs_get 与 caller-owned prealloc outputs 各 300 次。
+- 两条路径最终均输出 6 个检测框，class/score/box 均一致：cup、book、bottle、bottle、keyboard、dining table。
+- 计时仍受 NPU/RKNN 状态影响，预分配未在真实生产 Smoke 与正样本 benchmark 中稳定改善完整链路；不接入生产。
+- 阶段结论：输出获取和常规 DFL/NMS 暂无可安全确认的收益，生产模型与生产二进制保持不变。
+## EXP-043：板端 perf 函数采样可用性
+
+- 检查结果：板端存在 perf/gprof 命令名，但 perf 提示缺少当前 6.1.118 内核对应的 linux-tools，无法生成函数采样报告。
+- 结论：未修改生产推理逻辑；后续如需继续 CPU 阶段定位，应在 benchmark 内置候选扫描/DFL/NMS 阶段计时。
+## EXP-044：直接调用已安装 perf 的板端函数采样
+
+- 板端 linux-tools 已安装，但 /usr/bin/perf wrapper 按当前 6.1.118 内核查找不存在的版本化工具；直接调用 /usr/lib/linux-tools-5.15.0-185/perf 成功采样。
+- 固定桌面正样本、RKNN benchmark 300 runs 采样：RockchipYoloPostprocess::process 66.87%，rknn_outputs_get 19.41%，rknn_run 8.77%，nms 0.23%，expf 1.38%。
+- 结论：NMS 不是热点；下一步拆分 process 内部候选扫描/类别筛选与 DFL 解码耗时，不安装不匹配的 6.1 工具包，也不据此直接改生产逻辑。
+
+## EXP-045 RockchipYoloPostprocess::process 循环重构与缓存优化（2026-07-11）
+
+### 状态
+
+已完成。通过重构后处理循环顺序，极大地提高了 L1/L2 缓存本地性，在板端 300 次 benchmark 实测中获得 **1.297 ms** 稳定收益，结果完全一致。该版本已正式部署为正式板端程序。
+
+### 日期
+
+2026-07-11
+
+### 目的
+
+使用板端 `/usr/lib/linux-tools-5.15.0-185/perf` 对带调试符号的 benchmark 采样和汇编级分析（`perf annotate`）。定位 `RockchipYoloPostprocess::process` 内部的具体 CPU 热点，并设计 semantically equivalent 的 A/B 优化以减少后处理时间。
+
+### 瓶颈定位
+
+通过 `perf record` 与 `perf annotate` 对固定正样本输入进行分析，发现热点完全集中在 `RockchipYoloPostprocess::process` 的 class 分类分数检索内层循环中：
+```assembly
+   41.64 :   c620:   csel    w2, w0, w23, gt
+```
+对应 C++ 语句 `int8_t score = score_tensor[class_id * grid_len + cell];`。
+由于原始循环结构是 `cell` 在外层，`class_id` 在内层，且 `sum_tensor` 过滤能力在 80 类 background noise 累加下极其低下（95.4% 的 cells 均通过了 `sum_tensor` 门限进入了内层循环），导致内层循环不断以 `grid_len`（最大 6400 字节）的步长进行非连续的跨步内存访问，造成了严重的 L1/L2 缓存颠簸（Cache Thrashing）。
+
+### 优化实现
+
+将循环顺序进行转置（Restructure）：
+1. 外层遍历 `class_id`，内层顺序（步长为 1）遍历 `cell`。
+2. 为避免 heap 动态分配对中位数带来的抖动，在栈上分配 `best_scores` 和 `best_classes` 缓存区（仅在 `grid_len > 6400` 时才退避使用 `std::vector`），并使用 `std::fill_n` 初始化。
+3. 顺序地寻找并记录所有 cells 的 `best_class` 和 `best_score`。
+4. 第二阶段再顺序遍历 `best_classes` 缓存，仅对有效的候选 cell 进行 DFL 解码和检测框坐标映射构建。
+
+这使得对 `score_tensor` 的访问模式转为 100% 连续的顺序内存读取，使 L1/L2 缓存预取器完全发挥作用。
+
+### 测试结果
+
+1. **结果一致性校验**：
+   与 baseline 运行结果对比，在正样本输入下输出的 6 个检测框（包括类别 ID、置信度和 bounding box 坐标）完全 100% 相同，校验通过。
+2. **板端 300 次 Benchmark 性能对比**：
+   板端固定性能 Governor 下， warm-up 50 次， measured 300 次中位数实测：
+   - **Baseline**: `postprocess median = 4.139 ms`, `run_get_post median = 32.833 ms`
+   - **Optimized**: `postprocess median = 2.842 ms`, `run_get_post median = 31.597 ms`
+   - **净收益**：**1.297 ms**（后处理耗时下降 **31.3%**），且完全稳定，超过 0.3 ms 验收阈值。
+
+### 结论
+
+重构后处理循环使得 CPU 端后处理时间减少了 **1.297 ms**。该优化已在源码层合入主线，并已正式部署替换为板端正式程序 `~/AlertGateway/AlertGateway`（备份为 `~/AlertGateway/AlertGateway.bak.20260711_205840`），并成功完成了 60 秒 smoke 真机验证，加载、推理、编码及优雅退出全部正常。
+
+## EXP-046 优化后性能收口与后处理阶段级剖析（2026-07-11）
+
+### 状态
+
+已完成。在 benchmark 中成功引入 `--postprocess-stages` 选项目标测量，获得高精度的后处理四个子阶段耗时统计；结果确认非类别筛选阶段（DFL + Box 映射 + NMS）累计耗时仅 0.161 ms，不具备任何 >= 0.3 ms 的优化空间，正式并明确关闭 CPU 后处理的进一步优化。
+
+### 日期
+
+2026-07-11
+
+### 目的
+
+以已部署的正式优化版为对象，在 performance governor、all NPU cores、SRAM、zero-copy、warmup=50、runs=300 和固定桌面正样本输入下统计后处理阶段级时钟耗时（候选扫描/类别筛选、DFL 解码、坐标映射与检测框构建、NMS），评估后续独立阶段的优化价值，并校验输出检测框的完全一致性。
+
+### 测试结果
+
+1. **多指标基线与阶段计时 (300 Runs)**：
+   - `rknn_run_wall`: mean=26.59 ms, median = **26.58 ms**, P90 = **26.65 ms**
+   - `outputs_get`: mean=1.21 ms, median = **1.21 ms**, P90 = **1.24 ms**
+   - `postprocess`: mean=2.86 ms, median = **2.86 ms**, P90 = **2.87 ms**
+   - `run_get_post`: mean=30.67 ms, median = **30.65 ms**, P90 = **30.74 ms**
+   - **后处理子阶段耗时分布**：
+     - `stage_scan`（候选扫描/类别筛选）: mean=2.644 ms, median = **2.642 ms**, P90 = **2.649 ms**
+     - `stage_dfl`（DFL解码）: mean=0.136 ms, median = **0.135 ms**, P90 = **0.142 ms**
+     - `stage_box_map`（坐标映射与框构建）: mean=0.009 ms, median = **0.009 ms**, P90 = **0.010 ms**
+     - `stage_nms`（NMS去重）: mean=0.018 ms, median = **0.017 ms**, P90 = **0.018 ms**
+2. **结果等价性检验**：
+   - 候选 timed postprocess 吐出的 6 个检测框，其类别、置信度以及坐标，与正式基线版本完全 100% 相同，成功通过等价一致性门限：
+     - `det[0]` class=41 (cup) score=0.8728 box=(172.4810, 209.1167, 313.7706, 349.6657)
+     - `det[1]` class=73 (book) score=0.7252 box=(402.0489, 306.4473, 639.3439, 554.5385)
+     - `det[2]` class=39 (bottle) score=0.6932 box=(65.5135, 216.4703, 110.8642, 310.0852)
+     - `det[3]` class=39 (bottle) score=0.5244 box=(53.4467, 218.6018, 72.2427, 297.1345)
+     - `det[4]` class=66 (keyboard) score=0.3817 box=(494.4708, 219.3592, 640.0000, 337.6736)
+     - `det[5]` class=60 (dining table) score=0.2672 box=(0.3466, 110.2229, 639.2637, 554.4808)
+
+### 结论
+
+- 阶段时钟表明：后处理的总耗时中 `stage_scan`（候选扫描/类别筛选）占了 **92.4%**。而除类别筛选外的其余全部阶段（DFL解码 + 坐标映射 + NMS）耗时总和仅为 **0.161 ms**。
+- 这项计时基线提供了确定性证据，证明除类别筛选阶段外，其余后处理阶段完全不存在单个或累计能带来 >= 0.3 ms 收益的优化空间。
+- **决策**：正式并**明确关闭 CPU 后处理的进一步优化**。后处理性能已经通过前期的循环 cache 优化榨取了最大空间，后续如果需要继续优化推理延迟，工作重心应转移至外部功耗物理测定或等待使用新模型结构/新数据集重启模型图级修改。

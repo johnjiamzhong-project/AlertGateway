@@ -19,7 +19,9 @@ include_directories(
 )
 
 # ── Sysroot ───────────────────────────────────────────────────────────────────
-set(SYSROOT /home/rambos/sysroot)
+set(ALERTGATEWAY_SYSROOT "/home/rambos/sysroot" CACHE PATH
+    "Board sysroot containing FFmpeg-rockchip headers and arm64 libraries")
+set(SYSROOT ${ALERTGATEWAY_SYSROOT})
 
 # FFmpeg rockchip 6.1 headers must come BEFORE system FFmpeg 4.4.2 headers
 # to match the ABI of /opt/ffmpeg-rockchip/lib/*.so on the board.
@@ -34,8 +36,9 @@ set(MPP_LIB      ${SYSROOT}/usr/lib/aarch64-linux-gnu/librockchip_mpp.so)
 set(PAHO_C_LIB   ${CMAKE_SOURCE_DIR}/third_party/paho/libpaho-mqtt3as.so.1)
 set(PAHO_CPP_LIB ${CMAKE_SOURCE_DIR}/third_party/paho/libpaho-mqttpp3.so.1)
 
-# RKNN runtime lives on the board; provide path via cmake -DRKNN_LIB_PATH=...
-set(RKNN_LIB_PATH "" CACHE PATH "Path to librknnrt.so")
+# RKNN runtime lives on the board; this is only the cross-link stub.
+set(RKNN_LIB_PATH "${CMAKE_SOURCE_DIR}/third_party/rknn/librknnrt.so" CACHE PATH
+    "Path to librknnrt.so, or directory containing librknnrt.so")
 
 # RGA: use the board's actual .so as link target (2.2.0-1, matches board exactly).
 set(RGA_LIB ${CMAKE_SOURCE_DIR}/third_party/rga/lib/librga.so.2.1.0)
@@ -57,7 +60,15 @@ add_executable(AlertGateway ${SOURCES})
 target_include_directories(AlertGateway PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 # RKNN: use stub .so for cross-link; real librknnrt.so is deployed on the board.
-set(RKNN_STUB ${CMAKE_SOURCE_DIR}/third_party/rknn/librknnrt.so)
+if(IS_DIRECTORY "${RKNN_LIB_PATH}")
+    set(RKNN_STUB "${RKNN_LIB_PATH}/librknnrt.so")
+else()
+    set(RKNN_STUB "${RKNN_LIB_PATH}")
+endif()
+
+if(NOT EXISTS "${RKNN_STUB}")
+    message(FATAL_ERROR "RKNN stub not found: ${RKNN_STUB}")
+endif()
 
 target_link_libraries(AlertGateway PRIVATE
     ${RKNN_STUB}
@@ -89,6 +100,7 @@ if(BUILD_RKNN_BENCHMARK)
         ${CMAKE_SOURCE_DIR}/src
     )
     target_link_libraries(rknn_benchmark PRIVATE ${RKNN_STUB} pthread)
+    target_compile_options(rknn_benchmark PRIVATE -g -O2)
 endif()
 
 # Camera + production InferThread smoke test without RTMP/MQTT dependencies.
