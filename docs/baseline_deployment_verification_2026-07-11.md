@@ -1,46 +1,46 @@
-# Baseline deployment verification report
+# 基线部署验证报告
 
-Date: 2026-07-11
+日期：2026-07-11
 
-## Scope
+## 验证范围
 
-Fixed six-class YOLOv8s baseline after board ISP recovery. MQTT was intentionally excluded.
+在开发板 ISP 恢复后，对固定 6 类目标的 YOLOv8s 基线模型进行了部署验证。MQTT 模块本次测试中有意排除。
 
-## Accuracy
+## 模型精度
 
-- Fixed test split: 29 images / 130 boxes.
-- Test mAP50: 77.18%; mAP50-95: 59.29%.
-- Baseline remains the accuracy and deployment reference.
-- 10% pruned, low-ratio, ReLU6, and distillation candidates were rejected and not deployed.
+- 固定测试集划分：29 张图片 / 130 个标注框。
+- 测试集 mAP50：77.18%；mAP50-95：59.29%。
+- 基线模型继续作为精度与部署的准入标准。
+- 10% 剪枝、低比例剪枝、ReLU6 替换以及知识蒸馏等候选模型由于精度未达标，均被拒绝，未进行部署。
 
-## Board Smoke
+## 板端 Smoke 验证
 
-- Board: firefly@192.168.0.200.
-- Camera: /dev/video20, YUYV 640x480, negotiated 15 FPS.
-- RKNN API 2.3.0, driver 0.9.8, rockchip_dfl, 9 outputs, zero-copy input.
-- 60-second run loaded the model, entered AlertGateway running, encoded, and exited cleanly with Done.
-- FLV verified: H.264, 640x480, 15 FPS, 57.667 seconds; encoder about 15.1 FPS.
-- Positive-scene repeat produced objs:1-2.
+- 开发板：firefly@192.168.0.200。
+- 摄像头：/dev/video20，YUYV 640x480 分辨率，协商帧率为 15 FPS。
+- 软件环境：RKNN API 2.3.0，驱动版本 0.9.8，rockchip_dfl（9输出），零拷贝输入。
+- 60秒 Smoke 测试：成功加载模型，进入 AlertGateway 运行状态，正常编码，并优雅退出（Done）。
+- FLV 文件验证：编码格式为 H.264，分辨率 640x480，15 FPS，时长为 57.667 秒；编码线程实际帧率约为 15.1 FPS。
+- 真实物体场景测试：多次运行均正常输出检测结果，objs 数为 1-2。
 
-## Performance
+## 性能测试
 
-- InferThread npu is the wall time around rknn_run; total includes preprocessing, copy, conversion, and postprocess.
-- Interactive governor: npu varied about 30-45 ms.
-- Temporary performance governor: npu mostly 27-31 ms; total mostly 31-37 ms.
-- Governor was restored to interactive after the comparison.
+- 推理线程中的 NPU 耗时代表 `rknn_run` 的墙钟时间；总耗时包含了图像预处理、拷贝、格式转换与后处理。
+- Interactive（互动）调度模式下：NPU 耗时抖动较大，大约在 30-45 ms 之间。
+- Performance（性能锁频）调度模式下：NPU 耗时主要在 27-31 ms 之间；总耗时主要在 31-37 ms 之间。
+- 对比测试结束后，调度模式临时恢复为了 Interactive 模式。
 
-## Final decision
+## 最终结论
 
-Baseline board validation is complete. Keep the baseline deployment artifact as reference. Future optimization must pass the fixed test mAP gate before another export and Smoke cycle.
+基线模型板端验证已全部通过。保留基线部署产物作为后续参考基准。未来的优化方案必须在固定测试集上通过 mAP 准入门槛后，才能进入下一次导出与板端 Smoke 验证流程。
 
-## Persistent performance policy follow-up
+## 持久化性能配置跟进
 
-After the initial temporary governor comparison, the existing ockchip-performance.service was deployed and enabled on the board. It locks CPU policies 0/4/6, NPU, and DDR to performance and disables CPUIdle state1. A 15-second production-path Smoke then measured knn_run at about 26.7 ms and total inference at about 33.9 ms with clean shutdown. The baseline model and application source were unchanged.
+在完成初始的临时调度器对比后，我们在板端部署并启用了现有的 `rockchip-performance.service` 服务。该服务将 CPU 核心（0/4/6 策略）、NPU 和 DDR 频率锁定为高性能模式，并禁用了 CPUIdle state1。随后进行 15 秒生产路径 Smoke 测试，测得 `rknn_run` 约为 26.7 ms，总推理耗时约为 33.9 ms，程序正常退出。基线模型及应用源码保持不变。
 
-## Long-run result
+## 长期稳定性运行结果
 
-A 120-second production-path run under the persistent performance service exited cleanly. Final samples remained about 26.7 ms for knn_run and 33.9-34.5 ms total inference. Post-run thermal readings were approximately 37.0-37.9 C across the reported zones, with no observed throttling or process failure. The performance policy is accepted as the current board baseline, subject to its higher power-consumption tradeoff.
+在持久化性能服务运行下，进行了 120 秒的生产路径测试，程序优雅退出。最终耗时采样保持在：`rknn_run` 约 26.7 ms，总推理耗时约 33.9-34.5 ms。运行后测得各区域温度在 37.0-37.9°C 左右，未观察到降频或进程异常。该性能锁频策略已被接受为当前板端的性能基准，其带来的高功耗折损在可接受范围内。
 
-## Five-minute stability result
+## 五分钟稳定性测试结果
 
-A 300-second production-path run under ockchip-performance.service completed on schedule with clean shutdown and detections observed. knn_run remained about 26.7 ms and total inference about 30-35 ms. Sampled thermal readings peaked around 37.9 C and returned to about 35-36 C after shutdown, with no observed throttling. No board power sensor was available, so absolute power consumption was not measured.
+在 `rockchip-performance.service` 启用状态下进行了 300 秒稳定性测试，程序按计划运行并在检测到目标后优雅退出。`rknn_run` 维持在约 26.7 ms，总推理耗时约 30-35 ms。采样温度在运行期间最高达到 37.9°C 左右，退出后回落至 35-36°C 左右，未观察到降频。由于开发板未暴露功耗传感器，本次未测定绝对功耗。

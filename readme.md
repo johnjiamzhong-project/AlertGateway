@@ -1,40 +1,44 @@
 # AlertGateway
 
-基于 RK3588S 的桌面物品检测系统（YOLO 检测流程验证 Demo）。
+基于 RK3588S 的智能边缘网关，面向 4K 视频流的实时目标检测与告警。
 
-边缘端 C++ 应用，运行在 Firefly ROC-RK3588S-PC 开发板上，摄像头俯拍桌面，实现摄像头采集、NPU 推理、检测结果画框、硬件编码推流、MQTT 上报的完整业务闭环，用于验证手机/杯子/键盘等桌面物品的 YOLO 检测全链路。
+边缘端 C++ 应用，运行在 Firefly ROC-RK3588S-PC 开发板上。视频来源支持本地 V4L2 摄像头与 RTMP/RTSP 拉流（SRS 转发）两种可配置模式，实现视频采集/拉流、NPU 推理、检测结果画框、硬件编码推流、MQTT 上报的完整业务闭环。推理侧支持三类可配置图像处理任务：Thumbnail 缩略图、ROI 区域追踪、ROI Tiling 小目标增强。
 
-经过多轮性能调优，单帧 NPU 推理（`rknn_run`）耗时在 ~31-45ms 区间，**实测发现这个耗时主要受 CPU 主频影响而非纯 NPU 硬件算力瓶颈**：CPU+NPU governor 都锁 `performance` 时可压到 ~31ms，真实运行时（CPU 频率随系统负载动态变化）在 32-51ms 间波动，详见 `docs/YOLOv5s与YOLOv8s-NPU耗时对比测试记录.md`。编码推流稳定运行在摄像头实际帧率，RTMP 端到端延迟 < 1s，支持断线自动重连。
+经过多轮性能调优，当前生产配置使用 Rockchip 官方九输出 YOLOv8s INT8 模型，NPU 阶段中位数约 26.7 ms（performance 锁频），后处理中位数 2.86 ms（L1/L2 缓存优化），完整推理链路约 30.65 ms。编码推流稳定运行在视频源实际帧率，RTMP 端到端延迟 < 1s，支持断线自动重连。
 
 ---
 
 ## 系统架构
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                   AlertGateway                       │
-│                                                      │
-│  采集线程                                            │
-│  V4L2 ──┬──────────────→  编码线程  →  推流线程       │
-│  /dev/video             MPP硬编      RTMP推流        │
-│         │                 h264_rkmpp                │
-│         │                    ▲                      │
-│         │            叠加最新检测框(SharedDetections) │
-│         └──→  推理线程  ───────┘                     │
-│              RKNN NPU                                │
-│              YOLOv8s  ──→  MQTT线程                  │
-│                            检测结果上报               │
-│                            Paho MQTT                 │
-└────────────────────┬────────────────────────────────┘
-                     │
-        ┌────────────┴────────────┐
-        ▼                         ▼
-  SRS（Windows）            MqttMonitor（Windows）
-  RTMP接收                   检测结果实时显示
-        │
-        ▼
-  RambosPlayer（Windows）
-  拉流播放（含检测框画面）
+┌──────────────────────────────────────────────────────────┐
+│                     AlertGateway                          │
+│                                                           │
+│  视频源（可配置）                                          │
+│  V4L2 本地摄像头   ─┐                                     │
+│  RTMP/RTSP 拉流    ─┤──→  推理线程（含图像处理任务）        │
+│  （SRS 转发）       │      RKNN NPU / YOLOv8s             │
+│                     │      · Thumbnail 缩略图              │
+│                     │      · ROI 过滤 / 追踪               │
+│                     │      · ROI Tiling 小目标增强          │
+│                     │               │                     │
+│                     │     SharedDetections                 │
+│                     │               ↓                     │
+│                     ├──────→  编码线程  →  推流线程         │
+│                     │        MPP H.264    RTMP 推流        │
+│                     │        叠加检测框                     │
+│                     └──────→  MQTT 线程                    │
+│                              检测结果上报                   │
+└───────────────────────┬──────────────────────────────────┘
+                        │
+           ┌────────────┴────────────┐
+           ▼                         ▼
+     SRS（主机）               MqttMonitor（主机）
+     RTMP 转发 / 4K 中继        检测结果实时显示
+           │
+           ▼
+     播放器（主机）
+     拉流播放（含检测框画面）
 ```
 
 ---
@@ -42,10 +46,21 @@
 ## 功能说明
 
 ### 核心业务
-- 摄像头俯拍桌面，实时采集画面
-- YOLOv8s NPU 推理，检测桌面上的目标物品（手机、杯子、键盘等）
-- 检测结果叠加画框（类别 + 置信度）后硬编码推流到 RTMP 服务器，便于直观验证检测效果
-- 检测结果（物品种类、数量、置信度、坐标）通过 MQTT 周期上报到上位机
+- 支持 V4L2 本地摄像头与 RTMP/RTSP 拉流（SRS 转发）两种视频来源，通过 `source.type` 配置切换
+- YOLOv8s NPU 推理，检测画面中的目标物品（手机、杯子、键盘等）
+- 检测结果叠加画框（类别 + 置信度）后硬编码推流到 RTMP 服务器
+- 检测结果（物品种类、数量、置信度）通过 MQTT 周期上报到上位机
+
+### 可配置图像处理任务
+
+三类任务可独立开启，默认全部关闭，不影响基础链路：
+
+| 任务 | 说明 |
+|------|------|
+| **Thumbnail 缩略图** | 检测后生成指定尺寸缩略图，附加到 MQTT payload（RGA 硬件缩放）|
+| **ROI 区域追踪** | 圈定感兴趣区域（归一化坐标），仅处理 ROI 内目标，支持停留时长追踪与进出事件上报 |
+| **ROI Tiling 推理** | 对 ROI 内区域做网格切分分别推理，弥补 4K 缩放后小目标漏检，结果合并全局 NMS |
+
 
 ### 检测目标类别
 
@@ -87,16 +102,22 @@
 ## 性能优化与工程特点
 
 ### Pipeline 并行解耦
-采集、推理、编码三条线程通过独立队列解耦：采集线程同时向编码队列（阻塞、不丢帧）和推理队列（非阻塞、可丢帧，始终推理最新帧）推送数据，推理速度不再决定编码推流帧率，编码线程稳定运行在摄像头采集帧率上。推理结果通过线程安全的共享结构传递给编码线程叠加画框，两条线程互不阻塞。
+采集/拉流、推理、编码三条线程通过独立队列解耦：视频源同时向编码队列（阻塞、不丢帧）和推理队列（非阻塞、可丢帧，始终推理最新帧）推送数据，推理速度不决定编码推流帧率，编码线程稳定运行在视频源帧率。推理结果通过线程安全的共享结构传递给编码线程叠加画框，两条线程互不阻塞。
 
 ### NPU 推理性能
-- **INT8 量化 + 双输出张量**：模型导出时将检测框回归（数值范围 0-640）与分类置信度（数值范围 0-1）拆分为两个独立输出张量分别量化校准，避免共享同一套量化参数导致分类精度损失，检测结果更可靠
-- **Zero-copy 输入 + RGA 硬件预处理**：摄像头原始 YUYV 画面通过 RGA 硬件加速器一次性完成颜色空间转换与缩放，直接写入 NPU 的 DMA 输入缓冲区，省去 CPU 软件转换开销，预处理耗时降至 1ms 级
-- 单帧 NPU 推理（`rknn_run`）耗时 ~31-45ms，**不是固定的硬件极限**：实测发现该耗时里包含受 CPU 主频影响的同步开销，CPU idle 408MHz 时高达 59ms，CPU+NPU governor 都锁 `performance` 时可压到 ~31ms；真实运行时因 governor 只按需顶部分核心，耗时在 32-51ms 间波动。完整测试过程见 `docs/YOLOv5s与YOLOv8s-NPU耗时对比测试记录.md`
+- **Rockchip 官方九输出 INT8 模型**：生产配置默认使用 `model/yolov8s_rockchip_dfl.rknn` 和 `model.output_layout=rockchip_dfl`，在 CPU 端完成 DFL、坐标解码和 NMS
+- **后处理循环优化**：重构类别筛选内层循环为顺序内存访问，改善 L1/L2 缓存命中，后处理中位数从 4.14 ms 降至 2.86 ms（降幅 31%）
+- **Zero-copy 输入 + RGA 硬件预处理**：视频源 YUYV / NV12 帧通过 RGA 一次性完成颜色空间转换与缩放，直接写入 NPU DMA 输入缓冲区
+- 各实验详情见 `docs/YOLOv8s-RK3588推理优化实验记录.md`
+
+### 视频叠框与标签
+- 编码线程在 NV12 DRM Buffer 上直接绘制检测框和“类别 + 置信度”标签，不依赖 OpenCV
+- 中文类别名仅用于视频绘制层，内部检测标签和 MQTT payload 仍保持英文 COCO 类别名
+- `stream.draw_detection_labels` 可开关标签绘制，`stream.bitrate_kbps` 控制 MPP CBR 目标码率；当前生产建议为 2000 kbps
 
 ### 推流稳定性
 - RTMP 推流参数（GOP、编码 profile、队列深度）针对低延迟场景调优，端到端延迟控制在 1 秒以内
-- 推流连接具备自动断线重连能力，网络抖动或服务端重启后无需人工介入即可恢复推流
+- 推流连接具备自动断线重连能力；`PullStreamThread` 拉流模式同样支持断线重连
 
 ### 摄像头帧率自适应
 根据 USB 摄像头在当前采集格式下的真实可达帧率配置采集参数，保证画面时间戳节奏与实际出帧速度一致，避免播放端缓冲异常。
@@ -111,9 +132,10 @@
 | 开发环境 | VSCode + Remote-WSL |
 | 构建系统 | CMake |
 | 交叉编译 | aarch64-linux-gnu-g++ 11.4.0 |
-| 摄像头采集 | V4L2 |
+| 视频采集 | V4L2（本地）/ FFmpeg avformat+avcodec（RTMP/RTSP 拉流）|
 | AI 推理 | RKNN Lite2 C API + YOLOv8s |
 | 硬件编码 | Rockchip MPP（h264_rkmpp） |
+| 图像处理 | RGA 硬件加速（格式转换 / 缩放 / crop）|
 | 推流 | RTMP |
 | 消息上报 | Paho MQTT C++ |
 | 线程通信 | 有界阻塞队列 + 条件变量 |
@@ -126,30 +148,40 @@
 ```
 AlertGateway/
 ├── CMakeLists.txt
-├── README.md
+├── readme.md
 ├── config/
 │   └── config.json          # 运行时配置
 ├── src/
 │   ├── main.cpp
 │   ├── common/
 │   │   ├── BlockingQueue.hpp    # 有界阻塞队列
-│   │   └── Frame.hpp            # 帧数据结构
+│   │   └── Frame.hpp            # 帧数据结构（含 pixel_format 字段）
 │   ├── capture/
-│   │   └── CaptureThread.cpp    # V4L2 采集线程
+│   │   ├── IVideoSource.hpp     # 视频源抽象接口（待开发）
+│   │   ├── CaptureThread.cpp    # V4L2 采集线程
+│   │   └── PullStreamThread.cpp # RTMP/RTSP 拉流线程（待开发）
 │   ├── infer/
 │   │   ├── InferThread.cpp      # RKNN 推理线程
-│   │   └── YoloPostprocess.cpp  # 后处理 + 类别过滤
+│   │   ├── RockchipYoloPostprocess.cpp # 官方九输出后处理
+│   │   ├── YoloPostprocess.cpp  # 旧双输出后处理 + 类别过滤
+│   │   ├── ThumbnailTask.cpp    # 缩略图生成任务（待开发）
+│   │   ├── RoiFilter.cpp        # ROI 过滤与追踪（待开发）
+│   │   └── TilingTask.cpp       # ROI Tiling 推理（待开发）
 │   ├── encode/
-│   │   └── EncodeThread.cpp     # MPP 硬编线程
+│   │   ├── EncodeThread.cpp     # MPP 硬编线程
+│   │   ├── font8x16.h           # ASCII 标签字体
+│   │   └── font16x16.h          # 中文标签字体
 │   ├── stream/
 │   │   └── StreamThread.cpp     # RTMP 推流线程
 │   └── mqtt/
 │       └── MqttThread.cpp       # MQTT 上报线程
 ├── model/
-│   └── yolov8s.rknn             # RKNN 模型文件
+│   └── .gitkeep                 # RKNN 模型文件不纳入 Git
 └── third_party/
     ├── rknn/                    # RKNN Lite2 头文件
     ├── mpp/                     # MPP 头文件
+    ├── rga/                     # RGA 头文件和链接库
+    ├── paho/                    # Paho MQTT 头文件和链接库
     └── nlohmann/                # JSON 库
 ```
 
@@ -161,14 +193,17 @@ AlertGateway/
 
 ```json
 {
-  "camera": {
-    "device": "/dev/video20",
+  "source": {
+    "type": "v4l2",              
+    "device": "/dev/video20",   
+    "url": "",                  
     "width": 640,
     "height": 480,
-    "fps": 30
+    "fps": 15
   },
   "model": {
-    "path": "model/yolov8s.rknn",
+    "path": "model/yolov8s_rockchip_dfl.rknn",
+    "output_layout": "rockchip_dfl",
     "conf_threshold": 0.25,
     "iou_threshold": 0.45
   },
@@ -177,16 +212,31 @@ AlertGateway/
     "report_interval_sec": 1
   },
   "stream": {
-    "rtmp_url": "rtmp://<YOUR_SRS_SERVER_IP>/live/desk"
+    "rtmp_url": "rtmp://<YOUR_SRS_SERVER_IP>/live/desk",
+    "bitrate_kbps": 2000,
+    "draw_detection_labels": true
   },
   "mqtt": {
     "broker": "<YOUR_MQTT_BROKER_IP>",
     "port": 1883,
     "topic": "desk/detect",
     "client_id": "AlertGateway-01"
+  },
+  "image_processing": {
+    "thumbnail": { "enabled": false, "width": 320, "height": 180, "on_detection_only": true },
+    "roi": {
+      "enabled": false,
+      "regions": [{ "id": "zone_a", "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 }],
+      "filter_outside": true,
+      "track_dwell_sec": 0.0
+    },
+    "tiling": { "enabled": false, "grid_cols": 2, "grid_rows": 1, "overlap_ratio": 0.1, "merge_iou_threshold": 0.45 }
   }
 }
 ```
+
+> `source.type` 可设为 `"v4l2"`（本地摄像头，默认）或 `"pull_stream"`（RTMP/RTSP 拉流）。  
+> 旧版 `camera` 节点继续支持，自动映射为 `source.type=v4l2`，向下兼容。
 
 ---
 
@@ -197,25 +247,36 @@ AlertGateway/
 板子上：
 - librknnrt.so（预装）
 - librockchip_mpp.so（预装）
-- libpaho-mqtt3c
+- librga.so（预装）
+- libpaho-mqtt3as.so / libpaho-mqttpp3.so
 
 WSL2 交叉编译工具链：
 - aarch64-linux-gnu-g++ 11.4.0
+- 板端 sysroot，默认路径为 `/home/rambos/sysroot`，需包含板端 FFmpeg-rockchip 6.1 头文件和 arm64 库
 
 交叉编译时链接用的 `.so`（`third_party/rknn/librknnrt.so`、`third_party/rga/lib/librga.so.2.1.0`、
 `third_party/paho/libpaho-mqtt3as.so.1`、`libpaho-mqttpp3.so.1`）属于板子厂商的预编译二进制，未随仓库提交（见 `.gitignore`）。
-首次 clone 后需要从板子上把对应版本的 `.so` 拷到 `third_party/` 同名路径下，再执行编译命令，否则链接会失败。
+首次 clone 后需要从板子上把对应版本的 `.so` 拷到 `third_party/` 同名路径下，并准备实际运行用的 `model/yolov8s_rockchip_dfl.rknn`，再执行编译和部署。
 
 ### 编译命令
 
 ```bash
 # WSL2 上
-mkdir build && cd build
-cmake .. -DCMAKE_TOOLCHAIN_FILE=../cmake/aarch64-toolchain.cmake
-make -j$(nproc)
+cmake -B build -DCMAKE_TOOLCHAIN_FILE=cmake/aarch64-toolchain.cmake
+cmake --build build -j$(nproc)
 
 # 传到板子
-scp AlertGateway firefly@192.168.0.200:~/AlertGateway/
+scp build/AlertGateway firefly@192.168.0.200:~/AlertGateway/
+scp config/config.json firefly@192.168.0.200:~/AlertGateway/config/
+```
+
+如果 sysroot 或 RKNN 链接 stub 不在默认路径，可显式传入：
+
+```bash
+cmake -B build \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/aarch64-toolchain.cmake \
+  -DALERTGATEWAY_SYSROOT=/path/to/sysroot \
+  -DRKNN_LIB_PATH=/path/to/librknnrt.so
 ```
 
 ---
@@ -250,6 +311,8 @@ cd ~/AlertGateway
 | `检测框消失问题排查记录.md` | 排查"输出视频检测框始终为空"问题的完整过程（最终定位为 INT8 量化时 box/class 共享 scale 导致分类精度丢失，见 BUG-009） |
 | `NPU官方demo测速对比记录.md` | 用瑞芯微官方 rknn_model_zoo demo 跑同一模型交叉验证 NPU 推理耗时，排查 CPU governor 降频对测速的干扰 |
 | `YOLOv5s与YOLOv8s-NPU耗时对比测试记录.md` | YOLOv5s vs YOLOv8s 的 `rknn_run` 对比测试，纠正"40ms 是硬件极限"结论，定位 CPU/NPU governor 对耗时的实际影响 |
+| `YOLOv8s-RK3588推理性能优化路线.md` | YOLOv8s 在 RK3588 上的性能优化路线、阶段结论和后续方向 |
+| `YOLOv8s-RK3588推理优化实验记录.md` | EXP-001 起的推理性能、精度、画质和输入尺寸实验记录 |
 | `知乎文章-NPU推理耗时踩坑记录.md` | 上述测试过程的踩坑实录整理版 |
 | `第三阶段-设备树入门.md` | RK3588S 设备树（Device Tree）入门记录 |
 | `第五阶段-MPP硬解.md` | MPP 硬件解码开发记录 |
@@ -269,15 +332,22 @@ cd ~/AlertGateway
 - [x] 项目骨架搭建（CMake + 目录结构）
 - [x] 有界阻塞队列实现（`BlockingQueue`）
 - [x] V4L2 采集线程（`CaptureThread`，mmap 零拷贝，双队列分发）
-- [x] RKNN 推理线程（`InferThread`，RGA 预处理 + 双输出张量分别量化）
-- [x] YOLOv8 后处理（`YoloPostprocess`，NMS + 目标类别过滤）
-- [x] 检测结果处理（画框逻辑已并入 `EncodeThread`，汇总上报已并入 `InferThread`；原独立的 `DetectionReporter` 已废弃并删除）
+- [x] RKNN 推理线程（`InferThread`，RGA 预处理 + `decoded`/`rockchip_dfl` 双布局支持）
+- [x] YOLOv8 后处理（`YoloPostprocess` / `RockchipYoloPostprocess`，DFL + NMS + 目标类别过滤）
+- [x] 检测结果处理（画框逻辑并入 `EncodeThread`，汇总上报并入 `InferThread`）
 - [x] MPP 编码线程（`EncodeThread`，YUYV→NV12 直转 + NV12 平面画框）
 - [x] RTMP 推流线程（`StreamThread`，支持断线自动重连）
 - [x] MQTT 上报线程（`MqttThread`）
 - [x] 配置文件加载（nlohmann/json）
-- [ ] 多路扩展支持
-- [x] RGA 硬件加速预处理（已实施并验证，见 `docs/RGA预处理加速方案.md`）
+- [x] RGA 硬件加速预处理（已实施并验证）
+- [x] 叠框中文标签与可配置码率（已实施并验证）
+- [x] 后处理循环 L1/L2 缓存优化（中位数 4.14 ms → 2.86 ms，降幅 31%）
+- [x] 持久化 performance 锁频服务（`tools/performance/rockchip-performance.service`）
+- [ ] **视频源抽象层**（`IVideoSource` + `PullStreamThread`，RTMP/RTSP 拉流）
+- [ ] **Thumbnail 缩略图任务**（RGA 缩放，MQTT 附图）
+- [ ] **ROI 区域过滤与追踪**（归一化坐标，帧间 IoU 追踪，停留事件）
+- [ ] **ROI Tiling 推理**（小目标增强，全局 NMS 合并）
+- [ ] 多路架构扩展（Channel ID 抽象，多路 `PullStreamThread` 实例）
 
 ---
 

@@ -635,3 +635,37 @@ V4L2摄像头采集
   - `stage_nms` (NMS box deduplication): **0.017 ms**
 - Equivalence: Confirmed that detection outputs (class IDs, confidence scores, bounding box coordinates) from the timed post-processing path match the baseline path 100% exactly.
 - Final Optimization Closure: The total time for DFL, box mapping, and NMS combined is only **0.161 ms** (much lower than the 0.3 ms threshold). This proves there is no independent optimization space remaining outside the class-filtering loop. As the class-filtering loop is already optimized for cache locality and further NEON vectorization is high-risk and has low return, the CPU post-processing optimization is officially closed. Any future latency improvements should focus on physical power measurements or a new network model architecture/larger datasets.
+
+## 2026-07-11 新开发方向：单路 4K 拉流 + 图像处理
+
+架构设计已确认，文档位于对话 artifact `implementation_plan.md`，后续开发以此为准。
+
+### 核心决策
+
+- **视频来源**：V4L2 本地采集 与 RTMP/RTSP 拉流（SRS 中转）均为一等可配置项，通过 `source.type` 切换，互不废弃。
+- **ROI 坐标系**：归一化浮点 0.0～1.0，与分辨率解耦。
+- **Tiling 范围**：仅对命中 ROI 的区域做 Tiling，单帧推理次数控制在 1～2 次；无 ROI 命中时回退整图缩放推理。
+- **现有代码边界**：`CaptureThread` / `InferThread` / `EncodeThread` 核心逻辑保持不变。
+
+### 新增模块（待开发）
+
+| 文件 | 说明 |
+|---|---|
+| `src/capture/IVideoSource.hpp` | 视频源抽象接口 |
+| `src/capture/PullStreamThread` | FFmpeg RTMP/RTSP 拉流线程 |
+| `src/infer/ThumbnailTask` | 缩略图生成，附加到 MQTT payload |
+| `src/infer/RoiFilter` | ROI 过滤 + 帧间 IoU 追踪 + 停留事件 |
+| `src/infer/TilingTask` | ROI 内 Tiling 推理 + 全局 NMS 合并 |
+
+### 需最小改动的现有文件（待开发时改动）
+
+`CaptureThread.hpp`（加继承）、`Frame.hpp`（加 pixel_format 字段）、`main.cpp`（source 工厂）、`InferThread.cpp`（格式判断 + 任务入口）、`EncodeThread.cpp`（NV12 直通路径）、`config.json`（新增 source / image_processing 节点）、`CMakeLists.txt`（注册新源文件）。
+
+### 验收门槛
+
+- 阶段一：`source.type=v4l2` 行为与现有完全一致；`pull_stream` 稳定拉流 60 秒无错误。
+- 阶段二：三类任务全部 disabled 时零影响；各任务独立验收。
+
+### 当前状态
+
+- 架构设计已确认，**源码零修改**，等待开发启动指令。
