@@ -47,6 +47,10 @@ set(RGA_LIB ${CMAKE_SOURCE_DIR}/third_party/rga/lib/librga.so.2.1.0)
 set(SOURCES
     src/main.cpp
     src/capture/CaptureThread.cpp
+    src/capture/PullStreamThread.cpp
+    src/infer/RoiFilter.cpp
+    src/infer/TilingTask.cpp
+    src/infer/ThumbnailTask.cpp
     src/infer/InferThread.cpp
     src/infer/RockchipYoloPostprocess.cpp
     src/infer/YoloPostprocess.cpp
@@ -109,6 +113,9 @@ if(BUILD_INFER_CAMERA_SMOKE)
     add_executable(infer_camera_smoke
         tools/benchmark/infer_camera_smoke.cpp
         src/capture/CaptureThread.cpp
+        src/infer/RoiFilter.cpp
+        src/infer/TilingTask.cpp
+        src/infer/ThumbnailTask.cpp
         src/infer/InferThread.cpp
         src/infer/RockchipYoloPostprocess.cpp
         src/infer/YoloPostprocess.cpp
@@ -124,4 +131,14 @@ if(BUILD_INFER_CAMERA_SMOKE)
         ${RGA_LIB}
         pthread
     )
+endif()
+
+option(BUILD_IMAGE_PROCESSING_SMOKE "Build image processing smoke test" OFF)
+if(BUILD_IMAGE_PROCESSING_SMOKE)
+    add_executable(image_processing_smoke
+        tools/benchmark/image_processing_smoke.cpp
+        src/infer/RoiFilter.cpp
+        src/infer/TilingTask.cpp
+        src/infer/ThumbnailTask.cpp)
+    target_include_directories(image_processing_smoke PRIVATE ${CMAKE_SOURCE_DIR}/src)
 endif()

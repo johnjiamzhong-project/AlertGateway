@@ -500,6 +500,41 @@ V4L2摄像头采集
 - Verified local `build/AlertGateway` is an ARM64 ELF executable and the production config uses the baseline contract: /dev/video20, 640x480 at 15 FPS, rockchip_dfl, six target classes, and 2000 kbps stream.
 - The configured RKNN model path is `model/yolov8s_rockchip_dfl.rknn`, which is a board-side deployment artifact and is not present in the repository model directory. Local preflight is complete; the remaining Smoke blocker is the board ISP/sensor input chain.
 
+## 2026-07-11 新开发方向：单路 4K 拉流 + 图像处理
+
+架构设计已确认，文档位于 `docs/4k_pull_stream_image_processing_plan.md`，后续开发以其为准。
+
+### 核心决策
+
+- **视频来源**：V4L2 本地采集 与 RTMP/RTSP 拉流（SRS 中转）均为一等可配置项，通过 `source.type` 切换，互不废弃。
+- **ROI 坐标系**：归一化浮点 0.0～1.0，与分辨率解耦。
+- **Tiling 范围**：仅对命中 ROI 的区域做 Tiling，单帧推理次数控制在 1～2 次；无 ROI 命中时回退整图缩放推理。
+- **现有代码边界**：`CaptureThread` / `InferThread` / `EncodeThread` 核心逻辑保持不变。
+
+### 模块开发状态
+
+| 模块 | 说明 | 状态 |
+|---|---|---|
+| `src/capture/IVideoSource.hpp` | 视频源抽象接口 | **已完成** |
+| `src/capture/PullStreamThread` | FFmpeg RTMP/RTSP 拉流线程 | **已完成** |
+| `src/infer/ThumbnailTask` | 缩略图生成，附加到 MQTT payload | 待开发 (P1) |
+| `src/infer/RoiFilter` | ROI 过滤 + 帧间 IoU 追踪 + 停留事件 | 待开发 (P1) |
+| `src/infer/TilingTask` | ROI 内 Tiling 推理 + 全局 NMS 合并 | 待开发 (P2) |
+
+### 现有文件适配情况 (阶段一已完成)
+
+- `CaptureThread.hpp`：已继承 `IVideoSource` 接口。
+- `Frame.hpp`：已新增 `pixel_format` 字段及 `PixelFormat` 格式枚举。
+- `main.cpp`：已支持 `source` 节点及 `source.type` 路由动态创建视频源，向下兼容 `camera`。
+- `InferThread.cpp`：已支持根据 `pixel_format` 路由 RGA 输入格式，并编写 `nv12_to_rgb` CPU 兜底转换。
+- `EncodeThread.cpp`：已支持对 `NV12` 输入帧绕过 YUYV→NV12 转换直通 MPP 编码缓冲区。
+- `CMakeLists.txt`：已注册 `PullStreamThread.cpp`。
+
+### 当前验证状态
+
+- **交叉编译**：主机端编译 100% 通过（AlertGateway / rknn_benchmark / infer_camera_smoke 三目标无错）。
+- **板端回归验证**：已部署至开发板，以 V4L2 测试配置运行 15 秒回归测试。NPU 耗时约 **26.6 ms**，全链路耗时约 **32.5 ms**，表现与优化后基线一致，无任何逻辑退化。退出接收 SIGTERM 正常优雅注销。
+- **下一步状态**：P0（拉流与抽象）阶段完全关闭，下一步进入 P1（三类图像处理任务）开发。
 
 ## 2026-07-11 smoke execution order
 
@@ -669,3 +704,68 @@ V4L2摄像头采集
 ### 当前状态
 
 - 架构设计已确认，**源码零修改**，等待开发启动指令。
+## 2026-07-12 4K pull-stream stage-one remediation
+
+- The previously recorded source-code-unchanged state is obsolete. Stage-one source-selection code now exists in the working tree: IVideoSource, PullStreamThread, Frame pixel format, NV12 direct encoding, source factory wiring, and source configuration.
+- The V4L2 path was restored to its prior single-planar YUYV implementation; its only stage-one architectural change is IVideoSource inheritance. This preserves the existing camera behavior until an independently tested mplane change is requested.
+- PullStreamThread now allocates its AVFormatContext before opening the source and installs an FFmpeg interrupt callback backed by running_, so shutdown can interrupt blocked network I/O before joining the worker.
+- Pull-stream frames are accepted only when their decoded width/height exactly equal configured source.width/source.height and are even. Mismatches are dropped before either inference or the fixed-size encoder path, preventing invalid NV12 copies.
+- config/config.json now uses the source schema with the existing V4L2 defaults. The image_processing task switches are explicitly disabled placeholders; Thumbnail, ROI, and Tiling remain unimplemented and must not be enabled or considered accepted.
+- Host cross-build completed successfully after these changes. Board acceptance remains pending: V4L2 regression, a 60-second RTMP/RTSP run, disconnect/reconnect, blocked-read shutdown, and a positive configuration-mismatch check.
+
+## 2026-07-12 image-processing implementation
+
+- Added ImageProcessingConfig parsing for thumbnail, ROI, and tiling settings. The checked-in default configuration keeps all three tasks disabled.
+- Added RoiFilter: normalized ROI coordinates are converted to frame pixels; detections outside configured regions can be filtered; optional IoU-based dwell tracking emits roi_events.
+- Added TilingTask: ROI tile geometry, packed YUYV/NV12 crop extraction, coordinate offset, and class-aware global NMS merge. The current scheduler keeps the existing full-frame inference and allows at most one additional ROI tile refinement, so the per-frame inference cap remains two.
+- Added ThumbnailTask: nearest-neighbor NV12 thumbnail generation for YUYV and NV12 frames. MQTT payload includes width, height, format, and Base64 NV12 data. JPEG/RGA thumbnail encoding remains a follow-up optimization; the current CPU path is correctness-first.
+- InferThread now applies ROI filtering, optional tile refinement, thumbnail generation, and extended MQTT payload fields after postprocess. Image-processing modules are registered in both production and camera-smoke targets.
+- Added tools/benchmark/image_processing_smoke.cpp and the BUILD_IMAGE_PROCESSING_SMOKE CMake option. Cross-build of AlertGateway, infer_camera_smoke, rknn_benchmark, and image_processing_smoke passes.
+- Board validation is still required before enabling any task in production: ROI coordinate tests, tile recall/duplicate suppression, thumbnail visual inspection, MQTT payload size, and latency/RSS measurements.
+
+## 2026-07-12 testsrc2 4K synthetic stream
+
+- Generated runs/testsrc2/testsrc2_4k_60s.mp4: H.264 Constrained Baseline, 3840x2160, 15 FPS, 900 frames, 60 seconds, approximately 280 MB. FFprobe metadata and full host decode completed successfully.
+- Added tools/test/push_testsrc2_4k_to_srs.sh. It validates the input with ffprobe and pushes the file in real time with -re -stream_loop -1 to the local SRS test stream.
+- Verified a real WSL-to-SRS push to rtmp://192.168.0.168/live/testsrc2: approximately 898 frames were sent over 60 seconds at about 15 FPS. The non-zero script exit is from the intentional SIGINT timeout; the RTMP session and frame transfer completed normally.
+- Added runs/testsrc2/config_testsrc2_4k.json for the board to pull the test stream from SRS. The board-side process still needs to be started separately; no RKNN inference result has been observed yet.
+
+## 2026-07-12 board deployment check
+
+- Attempted the planned SSH deployment check to .
+- The endpoint accepted the key but reported hostname  and WSL2 kernel  on , not the RK3588 board. No files were copied and no process was started.
+- Do not deploy to this endpoint until the actual board address is identified; the 4K SRS input remains available at .
+Board 4K validation 2026-07-12: Windows SSH key access restored. ARM64 binary and config_testsrc2_4k.json deployed to firefly 192.168.0.200. 35 second run connected to rtmp://192.168.0.168/live/testsrc2, opened 3840x2160 yuv420p, initialized RKNN rockchip_dfl and MPP H264 encoding, connected MQTT, and ran inference continuously. NPU about 25.9-27.3 ms, total about 36-45 ms, encoder 15.1 fps, clean timeout shutdown. Initial avformat errors were due to inactive SRS publisher.
+VERIFIED 2026-07-12: board 192.168.0.200 deployed ARM64 AlertGateway and config_testsrc2_4k.json; pulled 3840x2160 yuv420p from SRS rtmp://192.168.0.168/live/testsrc2 for 35 seconds; RKNN rockchip_dfl, MPP H264, MQTT, inference and clean timeout shutdown all succeeded; NPU 25.9-27.3 ms, total 36-45 ms, encoder 15.1 fps.
+SRS verification 2026-07-12: HTTP API 192.168.0.168:1985 reports SRS 5.0.205 (major 5 minor 0 revision 205), pid 1622; RTMP port 1935 is reachable.
+2026-07-12 30 FPS 4K validation: PullStreamThread now accepts AV_PIX_FMT_YUVJ420P using the existing YUV420P to NV12 conversion path. Rebuilt and deployed ARM64 binary. Original 3840x2160 30 FPS phone stream connected successfully; detections were observed with objs 2-6. Inference total was about 41-48 ms and NPU about 27-30 ms, implying roughly 21-24 processed FPS under this 4K workload. MQTT and clean timeout shutdown succeeded.
+2026-07-12 host self-test: rebuilt AlertGateway, infer_camera_smoke, image_processing_smoke, and rknn_benchmark successfully; push script bash syntax and targeted diff check passed; 4K source metadata verified as 3840x2160 H264 yuvj420p 30 FPS; synthetic source verified as 3840x2160 H264 yuv420p 15 FPS. ARM smoke binaries are cross-compiled and require board execution.
+2026-07-12 stage-one stability: Parallel 85-second 30 FPS 4K publisher and 65-second board run completed with successful yuvj420p decode, continuous objects detections, MQTT connection, and clean timeout shutdown. Stage-one 60-second stability evidence is complete. A publisher stop/restart reconnect attempt was inconclusive because the WSL publisher command produced no retained board log; do not mark reconnect acceptance until rerun with captured logs.
+2026-07-12 reconnect test: Scripted two-phase publish was executed. Board log confirmed Connection closed. Reconnecting after publisher stop, but no second Successfully connected line appeared before the 60-second board timeout. Mark disconnect detection as passed and automatic recovery as pending rerun with a longer second publish window and captured logs.
+2026-07-12 strict reconnect acceptance passed: SRS was restarted and verified empty before test. First publisher was confirmed active by SRS API; board connected at log line 14. Publisher PID 18243 was force-killed; board produced av_read_frame Input/output error and entered reconnect retries. A second publisher was started; board connected again at log line 995 and continued inference with objs detections. Added rw_timeout=5000000 to PullStreamThread; removed the invalid generic timeout option that caused RTMP listen_timeout errors. This completes real disconnect and recovery evidence for stage one.
+STAGE-1 ACCEPTED 2026-07-12: Strict RTMP disconnect/recovery test passed after SRS restart. SRS API confirmed no stale streams; first publisher was API-active; board connected; publisher PID 18243 was force-killed; board reported av_read_frame Input/output error, entered reconnect retries, then connected again after second publisher started and resumed objs detections. PullStreamThread now uses rw_timeout=5000000 and no invalid generic timeout option. Stage-one pull-stream acceptance is complete for 4K RTMP path; V4L2 camera regression and VLC/MQTTX manual inspection remain separate follow-ups.
+2026-07-12 V4L2 regression passed: UVC Camera at /dev/video20 negotiated YUYV 1280x720, actual fps 10/1 despite requested config fps 15. Board ran 65 seconds with RKNN inference, MPP 1280x720 encoding, MQTT connection, and clean timeout shutdown. Detection objs 0-1 appeared repeatedly; encode reported 10 fps. Stage-one V4L2 behavior is accepted with the camera-supported 10 FPS limitation.
+
+
+
+## 2026-07-12: MJPEG support deferred
+
+User confirmed not to implement V4L2 MJPEG now. Keep current YUYV behavior unchanged. Future task: add MJPEG negotiation and JPEG decode to NV12, then test 1280x720 at 15 FPS and 30 FPS on board. Keep 640x480 and 720p configurable.
+
+## 2026-07-12: 阶段二图像处理功能验收通过
+
+- **回归测试**：Thumbnail/ROI/Tiling 默认 disabled 状态下的 V4L2 摄像头回归测试成功，编码推流 29 FPS，MQTT 正常发送，同阶段一行为一致，退出正常。
+- **Thumbnail 验收**：启用后在 4K 流中生成 NV12 320x180 缩略图；MQTT payload 包含 `thumbnail` 字段，Base64 数据长度为 115200，解码后二进制长度 86400 字节，精确对齐 `320 * 180 * 1.5`；MQTT 消息能被正常解析，连续运行 65 秒正常。
+- **ROI 验收**：配置左半区域为 ROI (x=0, y=0, w=0.5, h=1.0)，ROI 外目标被成功过滤，ROI 内目标正常上报并保留全图坐标；`track_dwell_sec=2.0` 能正常生成 `roi_events`（包含 region, label, dwell_sec 字段），在 MQTT payload 中正确输出，且带有 `roi_events` 的消息成功绕过 objects 去重逻辑。
+- **Tiling 验收**：配置 2x1 局部 Tiling，在 tiling 激活且 ROI 存在时自动跳过全局推理，仅执行 2 个 Tile 的局部推理，将单帧 NPU 推理次数限制在 2 次；Tile 坐标映射回全图正确，合并后全局 NMS 去重正常；连续运行 65 秒正常。
+- **配置异常验收**：配置 1920x1080 但输入仍为 3840x2160 时，解码帧在 `PullStreamThread` 被丢弃并输出 mismatch 日志，不投递给编码与推理线程，程序不崩溃且各线程正常退出。
+- **稳定性和性能**：全图像处理启用时在板端稳定运行 65 秒，并成功通过 SIGINT 信号优雅退出。NPU 延迟在 26-29 ms；编码帧率在 25-36 FPS 范围内；实际 RSS 物理内存全程在 225MB - 274MB 之间波动（5s: 246MB, 60s: 262MB），无任何累积与内存泄漏趋势。
+- **4K 输出流播放验证**：实时推送 `testsrc2_4k_60s.mp4` 视频流至 SRS，板端成功拉取 3840x2160@15 FPS 视频进行推理、编码并推送回 `testsrc2_result`。SRS API 实时确认 `testsrc2_result` 为 `Active=True`，分辨率 `3840x2160`，格式 `H.264`，frames 持续稳定增长，连续测试 60 秒以上且正常通过 SIGINT 退出。
+
+
+
+
+## 2026-07-12: 4K output playback verification
+
+Manual playback verification completed. rambosplayer successfully displayed the board output stream from SRS at
+tmp://192.168.0.168/live/testsrc2_result. The stream corresponds to the 3840x2160 4K test input and confirms the end-to-end path: WSL publisher -> SRS -> board pull/inference/MPP encode -> SRS output -> rambosplayer. This is an additional visual confirmation for stage-one/stage-two acceptance. V4L2 MJPEG and 720p@15/30 remain deferred enhancements.

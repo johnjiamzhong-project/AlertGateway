@@ -70,7 +70,7 @@ int main(int argc, char** argv) {
         BlockingQueue<std::string> mqtt_queue(16);
         SharedDetections shared_detections;
         CaptureThread capture(camera, enc_queue, infer_queue);
-        InferThread infer(model, detection, infer_queue, mqtt_queue,
+        InferThread infer(model, detection, ImageProcessingConfig{}, infer_queue, mqtt_queue,
                           shared_detections);
 
         std::atomic<bool> drain_running{true};

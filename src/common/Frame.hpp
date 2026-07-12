@@ -3,6 +3,13 @@
 #include <string>
 #include <cstdint>
 
+// 帧像素格式：YUYV (V4L2 采集) 或 NV12 (FFmpeg 解码)
+enum class PixelFormat {
+    YUYV,
+    NV12
+};
+
+
 // 单个目标的检测结果。由 InferThread 通过 YoloPostprocess 生成，
 // 存入 Frame::detections 或 SharedDetections，供 EncodeThread 叠框使用。
 struct Detection {
@@ -16,12 +23,13 @@ struct Detection {
 // raw_data 由 V4L2 mmap 拷贝填入；rgb_data 由 EncodeThread 在 YUYV→NV12
 // 转换过程中顺带生成，供调试或未来扩展使用（当前叠框直接在 NV12 上操作）。
 struct Frame {
-    std::vector<uint8_t> raw_data;      // V4L2 采集的原始 YUYV422 数据
+    std::vector<uint8_t> raw_data;      // V4L2 采集的原始 YUYV422 数据，或拉流解码后的 NV12 数据
     std::vector<uint8_t> rgb_data;      // 转换后的 RGB24 数据（原始分辨率，暂未使用）
     int     width        = 0;
     int     height       = 0;
     int64_t timestamp_ms = 0;           // 采集时间戳（ms），用于调试和未来 PTS 校准
     std::vector<Detection> detections;  // 本帧的推理结果，由 InferThread 写入
+    PixelFormat pixel_format = PixelFormat::YUYV; // 像素格式，默认 YUYV
 };
 
 // MPP 硬编后的 H.264 码流包，在 EncodeThread → StreamThread 之间流转。

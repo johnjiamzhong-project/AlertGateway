@@ -5,6 +5,8 @@
 #include <vector>
 #include "common/BlockingQueue.hpp"
 #include "common/Frame.hpp"
+#include "capture/IVideoSource.hpp"
+
 
 // 摄像头配置，从 config.json 读取后传入 CaptureThread
 struct CameraConfig {
@@ -14,7 +16,7 @@ struct CameraConfig {
     int fps;             // 目标帧率，通过 VIDIOC_S_PARM 下发给驱动（驱动可能调整到最近支持值）
 };
 
-// V4L2 采集线程，Pipeline 的数据源头。
+// V4L2 采集线程，Pipeline 的数据源头。实现 IVideoSource 接口。
 //
 // 使用 mmap 零拷贝模式：内核采集缓冲区直接映射到用户空间，
 // 取帧时只做一次 assign 拷贝（内核buf → Frame::raw_data），
@@ -24,7 +26,7 @@ struct CameraConfig {
 //   enc_queue  — 阻塞投递（timeout=100ms），每帧必达，背压由队列容量控制
 //   infer_queue — 非阻塞投递（timeout=0），InferThread 忙时直接丢帧，
 //                 避免推理慢拖垮采集帧率
-class CaptureThread {
+class CaptureThread : public IVideoSource {
 public:
     CaptureThread(const CameraConfig& cfg,
                   BlockingQueue<Frame>& enc_queue,

@@ -477,14 +477,19 @@ void EncodeThread::run() {
             continue;
         }
 
-        // YUYV → NV12：RGA 直接写入 DRM buffer，失败时回退 CPU + memcpy 兜底
-        bool rga_ok = rga_yuyv_to_nv12(frame.raw_data.data(), drm_ptr, w, h);
-        if (!rga_ok) {
-            yuyv_to_nv12(frame.raw_data.data(), nv12_buf.data(), w, h);
-            memcpy(drm_ptr, nv12_buf.data(), frame_size);
-            if (++rga_fail_count % 30 == 1) {
-                std::cerr << "[Encode] RGA yuyv_to_nv12 failed, using CPU fallback ("
-                          << rga_fail_count << " times)\n" << std::flush;
+        if (frame.pixel_format == PixelFormat::NV12) {
+            // 输入已经是 NV12，直接拷贝到 MPP 的 DRM 缓冲区，完全避免格式转换
+            memcpy(drm_ptr, frame.raw_data.data(), frame_size);
+        } else {
+            // YUYV → NV12：RGA 直接写入 DRM buffer，失败时回退 CPU + memcpy 兜底
+            bool rga_ok = rga_yuyv_to_nv12(frame.raw_data.data(), drm_ptr, w, h);
+            if (!rga_ok) {
+                yuyv_to_nv12(frame.raw_data.data(), nv12_buf.data(), w, h);
+                memcpy(drm_ptr, nv12_buf.data(), frame_size);
+                if (++rga_fail_count % 30 == 1) {
+                    std::cerr << "[Encode] RGA yuyv_to_nv12 failed, using CPU fallback ("
+                              << rga_fail_count << " times)\n" << std::flush;
+                }
             }
         }
 

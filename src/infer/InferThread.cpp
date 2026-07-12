@@ -8,15 +8,30 @@
 #include <ctime>
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
+static std::string encode_base64(const std::vector<uint8_t>& bytes) {
+    static const char table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    for (size_t i=0; i<bytes.size(); i+=3) {
+        uint32_t v=bytes[i]<<16;
+        if(i+1<bytes.size()) v|=bytes[i+1]<<8;
+        if(i+2<bytes.size()) v|=bytes[i+2];
+        out += table[(v>>18)&63]; out += table[(v>>12)&63];
+        out += i+1<bytes.size()?table[(v>>6)&63]:'=';
+        out += i+2<bytes.size()?table[v&63]:'=';
+    }
+    return out;
+}
 
 // 只保存引用/配置，不做任何 RKNN 或线程相关的初始化——真正的初始化都推迟到 start()，
 // 这样构造对象本身不会失败，失败（模型加载不了等）统一在 start() 里抛异常处理。
 InferThread::InferThread(const ModelConfig& model_cfg,
                          const DetectionConfig& det_cfg,
+                         const ImageProcessingConfig& image_cfg,
                          BlockingQueue<Frame>& in_queue,
                          BlockingQueue<std::string>& mqtt_queue,
                          SharedDetections& shared_dets)
     : cfg_(model_cfg), det_cfg_(det_cfg),
+      image_cfg_(image_cfg),
       in_queue_(in_queue), mqtt_queue_(mqtt_queue), shared_dets_(shared_dets) {}
 
 // 析构时兜底调用 stop()，保证即使调用方忘记手动 stop，线程和 RKNN 资源也不会泄漏。
@@ -177,6 +192,33 @@ bool InferThread::load_model() {
     return true;
 }
 
+// CPU 路径：NV12 (4:2:0 Semi-Planar) → RGB888 颜色空间转换，按 BT.601 标准公式。
+// 仅作为 RGA 硬件转换失败时的兜底。
+static void nv12_to_rgb(const uint8_t* nv12, uint8_t* rgb, int width, int height) {
+    auto clamp = [](int v) -> uint8_t {
+        return static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
+    };
+    const uint8_t* y_plane = nv12;
+    const uint8_t* uv_plane = nv12 + width * height;
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            int y = y_plane[i * width + j];
+            int uv_idx = (i / 2) * width + (j & ~1);
+            int u = uv_plane[uv_idx];
+            int v = uv_plane[uv_idx + 1];
+
+            int c = y - 16;
+            int d = u - 128;
+            int e = v - 128;
+
+            int rgb_idx = (i * width + j) * 3;
+            rgb[rgb_idx + 0] = clamp((298 * c + 409 * e + 128) >> 8);
+            rgb[rgb_idx + 1] = clamp((298 * c - 100 * d - 208 * e + 128) >> 8);
+            rgb[rgb_idx + 2] = clamp((298 * c + 516 * d + 128) >> 8);
+        }
+    }
+}
+
 // CPU 路径：YUYV422 → RGB888 颜色空间转换，按 BT.601 标准公式逐像素计算。
 // 只在 RGA 硬件转换失败时作为兜底调用（见 rga_yuyv_to_rgb_resize 的返回值检查），
 // 正常情况下不会走这里，纯CPU计算比RGA慢很多。
@@ -220,10 +262,13 @@ static void resize_rgb(const uint8_t* src, int sw, int sh,
 
 // RGA 硬件一次完成 YUYV422 -> RGB888 + 缩放（整图拉伸，不做 letterbox）。
 // 返回 false 时 dst 内容不可信，调用方应回退到 CPU 路径。
-static bool rga_yuyv_to_rgb_resize(const uint8_t* src, int sw, int sh,
-                                    uint8_t* dst, int dw, int dh) {
+// RGA 硬件一次完成 YUV (YUYV 或 NV12) -> RGB888 + 缩放（整图拉伸，不做 letterbox）。
+// 返回 false 时 dst 内容不可信，调用方应回退到 CPU 路径。
+static bool rga_yuv_to_rgb_resize(const uint8_t* src, int sw, int sh, PixelFormat fmt,
+                                   uint8_t* dst, int dw, int dh) {
+    int rga_fmt = (fmt == PixelFormat::NV12) ? RK_FORMAT_YCbCr_420_SP : RK_FORMAT_YUYV_422;
     rga_buffer_t src_buf = wrapbuffer_virtualaddr(
-        const_cast<uint8_t*>(src), sw, sh, RK_FORMAT_YUYV_422);
+        const_cast<uint8_t*>(src), sw, sh, rga_fmt);
     rga_buffer_t dst_buf = wrapbuffer_virtualaddr(dst, dw, dh, RK_FORMAT_RGB_888);
     rga_buffer_t pat_buf{};
 
@@ -235,6 +280,61 @@ static bool rga_yuyv_to_rgb_resize(const uint8_t* src, int sw, int sh,
     if (ret <= 0) {
         std::cerr << "[Infer] RGA improcess failed: " << imStrError(ret)
                    << " (" << ret << ")\n" << std::flush;
+        return false;
+    }
+    return true;
+}
+
+struct LetterboxGeometry {
+    int width;
+    int height;
+    int left;
+    int top;
+};
+
+static LetterboxGeometry letterbox_geometry(int sw, int sh, int dw, int dh) {
+    float scale = std::min(static_cast<float>(dw) / sw,
+                           static_cast<float>(dh) / sh);
+    int width = static_cast<int>(std::round(sw * scale));
+    int height = static_cast<int>(std::round(sh * scale));
+    return {width, height, (dw - width) / 2, (dh - height) / 2};
+}
+
+static void resize_rgb_letterbox(const uint8_t* src, int sw, int sh,
+                                 uint8_t* dst, int dw, int dh) {
+    const auto box = letterbox_geometry(sw, sh, dw, dh);
+    std::fill(dst, dst + static_cast<size_t>(dw) * dh * 3, 114);
+    for (int dy = 0; dy < box.height; ++dy) {
+        int sy = dy * sh / box.height;
+        for (int dx = 0; dx < box.width; ++dx) {
+            int sx = dx * sw / box.width;
+            const uint8_t* source = src + (sy * sw + sx) * 3;
+            uint8_t* target = dst + ((box.top + dy) * dw + box.left + dx) * 3;
+            target[0] = source[0];
+            target[1] = source[1];
+            target[2] = source[2];
+        }
+    }
+}
+
+// RGA 硬件一次完成 YUV (YUYV 或 NV12) -> RGB888 + 缩放并补 114 灰边（Letterbox）。
+// 返回 false 时 dst 内容不可信，调用方应回退到 CPU 路径。
+static bool rga_yuv_to_rgb_letterbox(const uint8_t* src, int sw, int sh, PixelFormat fmt,
+                                     uint8_t* dst, int dw, int dh) {
+    const auto box = letterbox_geometry(sw, sh, dw, dh);
+    std::fill(dst, dst + static_cast<size_t>(dw) * dh * 3, 114);
+    int rga_fmt = (fmt == PixelFormat::NV12) ? RK_FORMAT_YCbCr_420_SP : RK_FORMAT_YUYV_422;
+    rga_buffer_t src_buf = wrapbuffer_virtualaddr(
+        const_cast<uint8_t*>(src), sw, sh, rga_fmt);
+    rga_buffer_t dst_buf = wrapbuffer_virtualaddr(dst, dw, dh, RK_FORMAT_RGB_888);
+    rga_buffer_t pat_buf{};
+    im_rect srect{0, 0, sw, sh};
+    im_rect drect{box.left, box.top, box.width, box.height};
+    im_rect prect{0, 0, 0, 0};
+    IM_STATUS ret = improcess(src_buf, dst_buf, pat_buf, srect, drect, prect, 0);
+    if (ret <= 0) {
+        std::cerr << "[Infer] RGA letterbox failed: " << imStrError(ret)
+                  << " (" << ret << ")\n" << std::flush;
         return false;
     }
     return true;
@@ -262,10 +362,19 @@ static json summarize_objects(const std::vector<Detection>& dets) {
 // 该类里的最高置信度，输出形如 {"timestamp":..,"objects":[{"label","count","score"},...]}
 // 的 JSON 字符串。这里只做聚合不做节流/去重，节流（report_interval_sec）和
 // 去重（跟 summary_key() 比较）是 run() 调用它之后才做的事。
-std::string InferThread::summarize(const std::vector<Detection>& dets) {
+std::string InferThread::summarize(const std::vector<Detection>& dets, const Thumbnail* thumbnail, const std::vector<RoiEvent>* events) {
     json msg;
     msg["timestamp"] = static_cast<int64_t>(std::time(nullptr));
     msg["objects"]   = summarize_objects(dets);
+    if (thumbnail && !thumbnail->data.empty()) {
+        msg["thumbnail"] = {{"width", thumbnail->width}, {"height", thumbnail->height},
+                             {"format", thumbnail->format}, {"data", encode_base64(thumbnail->data)}};
+    }
+    if (events && !events->empty()) {
+        msg["roi_events"] = json::array();
+        for (const auto& e : *events)
+            msg["roi_events"].push_back({{"region", e.region_id}, {"label", e.label}, {"dwell_sec", e.dwell_sec}});
+    }
     return msg.dump();
 }
 
@@ -293,6 +402,12 @@ void InferThread::run() {
     std::vector<Detection> last_detections;
     int frame_idx = 0;
     int rga_fail_count = 0;
+    RoiFilter roi_filter(image_cfg_.roi);
+    TilingTask tiling_task(image_cfg_.tiling);
+    ThumbnailTask thumbnail_task(image_cfg_.thumbnail);
+    Thumbnail pending_thumbnail;
+    bool has_thumbnail = false;
+    std::vector<RoiEvent> pending_events;
 
 
     while (running_) {
@@ -306,74 +421,133 @@ void InferThread::run() {
         }
 
         if (frame_idx % step == 0) {
-            using clk = std::chrono::steady_clock;
-            auto t0 = clk::now();
-
-            // YUYV→RGB888 + 缩放（推理专用，编码路径已不再使用此 buf）。
-            // RGA 硬件优先，失败时回退到 CPU 路径。
-            bool rga_ok = rga_yuyv_to_rgb_resize(frame.raw_data.data(), frame.width, frame.height,
-                                                  input_buf.data(), model_width_, model_height_);
-            if (!rga_ok) {
-                rgb_buf.resize(frame.width * frame.height * 3);
-                yuyv_to_rgb(frame.raw_data.data(), rgb_buf.data(), frame.width, frame.height);
-                resize_rgb(rgb_buf.data(), frame.width, frame.height,
-                           input_buf.data(), model_width_, model_height_);
-                if (++rga_fail_count % 30 == 1) {
-                    std::cerr << "[Infer] RGA path failed, using CPU fallback ("
-                              << rga_fail_count << " times)\n" << std::flush;
-                }
-            }
-            auto t1 = clk::now();
-
-            // Zero-copy：直接 memcpy 进 NPU 的 DMA 输入缓冲区
-            memcpy(input_mem_->virt_addr, input_buf.data(), input_buf.size());
-            auto t2 = clk::now();
-
-            int run_ret = rknn_run(ctx_, nullptr);
-            auto t3 = clk::now();
-
-            if (run_ret == RKNN_SUCC) {
-                std::vector<rknn_output> outputs(static_cast<size_t>(n_output_));
-                for (int i = 0; i < n_output_; ++i) {
-                    outputs[i].index = i;
-                    outputs[i].want_float = cfg_.output_layout == "decoded";
-                    outputs[i].is_prealloc = 0;
-                }
-                int get_ret =
-                    rknn_outputs_get(ctx_, n_output_, outputs.data(), nullptr);
-                if (get_ret == RKNN_SUCC) {
-                    if (cfg_.output_layout == "decoded") {
-                        constexpr int N_ANCHORS = 8400;
-                        const float* box = static_cast<const float*>(
-                            outputs[box_output_idx_].buf);
-                        const float* cls = static_cast<const float*>(
-                            outputs[cls_output_idx_].buf);
-                        last_detections = decoded_postprocess_->process(
-                            box, cls, N_ANCHORS, frame.width, frame.height);
-                    } else {
-                        last_detections = rockchip_postprocess_->process(
-                            outputs, output_attrs_, model_width_, model_height_,
-                            frame.width, frame.height);
+            has_thumbnail = false;
+            pending_events.clear();
+            bool done_tiling = false;
+            if (image_cfg_.tiling.enabled && image_cfg_.roi.enabled) {
+                auto clamp01 = [](float v) { return std::max(0.0f, std::min(1.0f, v)); };
+                std::vector<RoiRect> temp_regions;
+                for (const auto& r : image_cfg_.roi.regions) {
+                    float x = clamp01(r.x), y = clamp01(r.y), x2 = clamp01(r.x + r.w), y2 = clamp01(r.y + r.h);
+                    if (x2 > x && y2 > y) {
+                        temp_regions.push_back({x * frame.width, y * frame.height, x2 * frame.width, y2 * frame.height});
                     }
-                    int release_ret =
-                        rknn_outputs_release(ctx_, n_output_, outputs.data());
-                    if (release_ret != RKNN_SUCC)
-                        std::cerr << "[Infer] rknn_outputs_release failed: "
-                                  << release_ret << "\n";
-                } else {
-                    std::cerr << "[Infer] rknn_outputs_get failed: "
-                              << get_ret << "\n";
                 }
-            } else {
-                std::cerr << "[Infer] rknn_run failed: " << run_ret << "\n";
+                if (!temp_regions.empty()) {
+                    auto tiles = tiling_task.make_tiles(frame.width, frame.height, temp_regions.front());
+                    if (!tiles.empty()) {
+                        std::cout << "[Infer] Running ROI Tiling with " << tiles.size() << " tiles.\n" << std::flush;
+                        last_detections.clear();
+                        for (const auto& tile : tiles) {
+                            Frame tile_frame = tiling_task.crop(frame, tile);
+                            auto tile_detections = infer_once(tile_frame);
+                            for (auto& d : tile_detections) {
+                                d.x1 += tile.x; d.x2 += tile.x;
+                                d.y1 += tile.y; d.y2 += tile.y;
+                            }
+                            last_detections.insert(last_detections.end(), tile_detections.begin(), tile_detections.end());
+                        }
+                        // Apply ROI filter to track/dwell events and filter outliers
+                        last_detections = roi_filter.filter(last_detections, frame.width, frame.height, frame.timestamp_ms, &pending_events);
+                        // Global NMS duplicate merge
+                        last_detections = tiling_task.merge(std::move(last_detections));
+                        done_tiling = true;
+                    }
+                }
             }
-            auto t4 = clk::now();
 
-            auto ms = [](auto a, auto b){ return std::chrono::duration<float,std::milli>(b-a).count(); };
-            std::cout << "[Infer] cpu:" << ms(t0,t1) << " cpy:" << ms(t1,t2)
-                      << " npu:" << ms(t2,t3) << " cnv:" << ms(t3,t4)
-                      << " total:" << ms(t0,t4) << " ms objs:" << last_detections.size() << "\n" << std::flush;
+            if (!done_tiling) {
+                using clk = std::chrono::steady_clock;
+                auto t0 = clk::now();
 
+                // YUYV/NV12 → RGB888 + 缩放（推理专用，编码路径已不再使用此 buf）。
+                // RGA 硬件优先，失败时回退到 CPU 路径。
+                bool use_letterbox = cfg_.output_layout == "rockchip_dfl";
+                bool rga_ok = use_letterbox
+                    ? rga_yuv_to_rgb_letterbox(frame.raw_data.data(), frame.width, frame.height, frame.pixel_format,
+                                                input_buf.data(), model_width_, model_height_)
+                    : rga_yuv_to_rgb_resize(frame.raw_data.data(), frame.width, frame.height, frame.pixel_format,
+                                             input_buf.data(), model_width_, model_height_);
+                if (!rga_ok) {
+                    rgb_buf.resize(frame.width * frame.height * 3);
+                    if (frame.pixel_format == PixelFormat::NV12) {
+                        nv12_to_rgb(frame.raw_data.data(), rgb_buf.data(), frame.width, frame.height);
+                    } else {
+                        yuyv_to_rgb(frame.raw_data.data(), rgb_buf.data(), frame.width, frame.height);
+                    }
+                    if (use_letterbox)
+                        resize_rgb_letterbox(rgb_buf.data(), frame.width, frame.height,
+                                             input_buf.data(), model_width_, model_height_);
+                    else
+                        resize_rgb(rgb_buf.data(), frame.width, frame.height,
+                                   input_buf.data(), model_width_, model_height_);
+                    if (++rga_fail_count % 30 == 1) {
+                        std::cerr << "[Infer] RGA path failed, using CPU fallback ("
+                                  << rga_fail_count << " times)\n" << std::flush;
+                    }
+                }
+                auto t1 = clk::now();
+
+                // Zero-copy：直接 memcpy 进 NPU 的 DMA 输入缓冲区
+                memcpy(input_mem_->virt_addr, input_buf.data(), input_buf.size());
+                auto t2 = clk::now();
+
+                int run_ret = rknn_run(ctx_, nullptr);
+                auto t3 = clk::now();
+
+                if (run_ret == RKNN_SUCC) {
+                    std::vector<rknn_output> outputs(static_cast<size_t>(n_output_));
+                    for (int i = 0; i < n_output_; ++i) {
+                        outputs[i].index = i;
+                        outputs[i].want_float = cfg_.output_layout == "decoded";
+                        outputs[i].is_prealloc = 0;
+                    }
+                    int get_ret =
+                        rknn_outputs_get(ctx_, n_output_, outputs.data(), nullptr);
+                    if (get_ret == RKNN_SUCC) {
+                        if (cfg_.output_layout == "decoded") {
+                            constexpr int N_ANCHORS = 8400;
+                            const float* box = static_cast<const float*>(
+                                outputs[box_output_idx_].buf);
+                            const float* cls = static_cast<const float*>(
+                                outputs[cls_output_idx_].buf);
+                            last_detections = decoded_postprocess_->process(
+                                box, cls, N_ANCHORS, frame.width, frame.height);
+                        } else {
+                            last_detections = rockchip_postprocess_->process(
+                                outputs, output_attrs_, model_width_, model_height_,
+                                frame.width, frame.height);
+                        }
+                        int release_ret =
+                            rknn_outputs_release(ctx_, n_output_, outputs.data());
+                        if (release_ret != RKNN_SUCC)
+                            std::cerr << "[Infer] rknn_outputs_release failed: "
+                                      << release_ret << "\n";
+                    } else {
+                        std::cerr << "[Infer] rknn_outputs_get failed: "
+                                  << get_ret << "\n";
+                    }
+                } else {
+                    std::cerr << "[Infer] rknn_run failed: " << run_ret << "\n";
+                }
+                auto t4 = clk::now();
+
+                auto ms = [](auto a, auto b){ return std::chrono::duration<float,std::milli>(b-a).count(); };
+                std::cout << "[Infer] cpu:" << ms(t0,t1) << " cpy:" << ms(t1,t2)
+                          << " npu:" << ms(t2,t3) << " cnv:" << ms(t3,t4)
+                          << " total:" << ms(t0,t4) << " ms objs:" << last_detections.size() << "\n" << std::flush;
+
+                // Apply ROI filter to filter outliers and track dwell times
+                last_detections = roi_filter.filter(last_detections, frame.width, frame.height,
+                                                    frame.timestamp_ms, &pending_events);
+            }
+
+            has_thumbnail = false;
+            if (image_cfg_.thumbnail.enabled &&
+                (!image_cfg_.thumbnail.on_detection_only || !last_detections.empty())) {
+                pending_thumbnail = thumbnail_task.create(frame);
+                has_thumbnail = true;
+            }
             shared_dets_.set(last_detections);
         }
         frame_idx++;
@@ -384,10 +558,44 @@ void InferThread::run() {
                 now - last_report_time_).count() >= det_cfg_.report_interval_sec) {
             last_report_time_ = now;
             std::string key = summary_key(last_detections);
-            if (key != last_summary_key_) {
+            if (key != last_summary_key_ || !pending_events.empty()) {
                 last_summary_key_ = key;
-                mqtt_queue_.push(summarize(last_detections), 100);
+                mqtt_queue_.push(summarize(last_detections, has_thumbnail ? &pending_thumbnail : nullptr, &pending_events), 100);
             }
         }
     }
+}
+
+std::vector<Detection> InferThread::infer_once(const Frame& frame) {
+    std::vector<uint8_t> input(static_cast<size_t>(model_width_)*model_height_*3);
+    bool letterbox = cfg_.output_layout == "rockchip_dfl";
+    bool ok = letterbox
+        ? rga_yuv_to_rgb_letterbox(frame.raw_data.data(), frame.width, frame.height, frame.pixel_format, input.data(), model_width_, model_height_)
+        : rga_yuv_to_rgb_resize(frame.raw_data.data(), frame.width, frame.height, frame.pixel_format, input.data(), model_width_, model_height_);
+    if (!ok) {
+        std::vector<uint8_t> rgb_buf(frame.width * frame.height * 3);
+        if (frame.pixel_format == PixelFormat::NV12) {
+            nv12_to_rgb(frame.raw_data.data(), rgb_buf.data(), frame.width, frame.height);
+        } else {
+            yuyv_to_rgb(frame.raw_data.data(), rgb_buf.data(), frame.width, frame.height);
+        }
+        if (letterbox) {
+            resize_rgb_letterbox(rgb_buf.data(), frame.width, frame.height, input.data(), model_width_, model_height_);
+        } else {
+            resize_rgb(rgb_buf.data(), frame.width, frame.height, input.data(), model_width_, model_height_);
+        }
+    }
+    std::memcpy(input_mem_->virt_addr, input.data(), input.size());
+    if (rknn_run(ctx_, nullptr) != RKNN_SUCC) return {};
+    std::vector<rknn_output> outputs(static_cast<size_t>(n_output_));
+    for (int i=0;i<n_output_;++i) { outputs[i].index=i; outputs[i].want_float=cfg_.output_layout=="decoded"; outputs[i].is_prealloc=0; }
+    std::vector<Detection> detections;
+    if (rknn_outputs_get(ctx_,n_output_,outputs.data(),nullptr)==RKNN_SUCC) {
+        if (cfg_.output_layout=="decoded") {
+            detections=decoded_postprocess_->process(static_cast<const float*>(outputs[box_output_idx_].buf),
+                static_cast<const float*>(outputs[cls_output_idx_].buf),8400,frame.width,frame.height);
+        } else detections=rockchip_postprocess_->process(outputs,output_attrs_,model_width_,model_height_,frame.width,frame.height);
+        rknn_outputs_release(ctx_,n_output_,outputs.data());
+    }
+    return detections;
 }
