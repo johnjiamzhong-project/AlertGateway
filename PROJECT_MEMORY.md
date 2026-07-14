@@ -1,6 +1,6 @@
 # AlertGateway 项目记忆
 
-最后更新：2026-07-11
+最后更新：2026-07-14
 
 ## 使用规则
 
@@ -832,3 +832,105 @@ tmp://192.168.0.168/live/testsrc2_result. The stream corresponds to the 3840x216
 ## 2026-07-14 corrected 30 FPS 12/18 Mbps quality comparison
 
 The first automated 12/18 Mbps report was invalid because it used the old AlertGateway binary and board configs at 15 FPS. The corrected run uses AlertGateway.maxfps_20260714 with 30 FPS configs. 12 Mbps measured 12007.9 kbps, 29.99 FPS, PSNR 28.4200 dB, SSIM 0.5735; 18 Mbps measured 18087.0 kbps, 30.08 FPS, PSNR 28.4099 dB, SSIM 0.5813. Both had zero write failures and zero queue depth. 18 Mbps has a small SSIM advantage in this single aligned frame; PSNR is effectively tied, so 12 Mbps remains a valid bandwidth-efficient setting. Artifacts: runs/testsrc2/quality_compare_12v18_20260714/.
+
+## 2026-07-14 V4L2 4K output probe
+
+- 板端 `/dev/video20` UVC 摄像头能力表最高为 1280x960 YUYV/MJPG，不支持 3840x2160。
+- 临时 V4L2 配置请求 3840x2160 时，驱动实际协商为 1280x960，`CaptureThread` 按设计报
+  `V4L2 resolution mismatch` 并拒绝启动；生产配置未修改。
+- 临时 V4L2 配置请求 1280x720 时，程序正常打开并按 1280x720 初始化 MPP/推流，驱动实际
+  帧率为 10 FPS（请求 15 FPS 未被满足）。
+- 当前 `main.cpp` 将源尺寸同时传给 EncodeThread/StreamThread，编码路径没有独立输出尺寸和
+  4K 放大处理。因此原 V4L2 工作流目前只能按摄像头原始尺寸推流，不能直接恢复为 4K；
+  需要后续独立的输出尺寸配置和 RGA 缩放链路。详细探针记录见
+  `docs/4k/v4l2_4k_output_probe_20260714.md`。
+- 已补齐可直接用于板端回归的 `runs/testsrc2/config_v4l2_720p.json`；视频源仍通过
+  `source.type` 在 `v4l2` 和 `pull_stream` 之间切换。
+- 2026-07-14 使用该配置完成约 60 秒板端 V4L2 推流测试：摄像头协商 1280x720 YUYV、实际
+  10 FPS；MPP/RTMP 均为 1280x720，稳定窗口约 9.75～9.91 FPS，`put_fail/out_drop/write_fail`
+  均为 0、队列深度为 0，检测持续运行并正常输出 `Done`。原始日志为
+  `runs/testsrc2/board_v4l2_720p_20260714.log`。
+- 2026-07-14 使用 `runs/input_videos/4k/VID_20260712_131410.mp4` 做 `pull_stream` 验证，
+  输出地址复用 `rtmp://192.168.0.168/live/v4l2_720p_result`。板端成功解码
+  3840x2160 yuvj420p，SRS 确认共享输出为活跃的 3840x2160 H.264 Main；稳定窗口约
+  30.34～32.51 FPS、约 6.7 Mbps，另有窗口降至 26.30 FPS。稳定窗口无 put/out/write 错误，
+  启动阶段发生 1 次 RTMP 重连和 12 个输出包丢弃后恢复。详细记录见
+  `docs/4k/pull_stream_file_shared_output_20260714.md`。
+
+## 2026-07-14 独立地址 4K 实际帧完整性验证
+
+- 为排除复用 V4L2 测试地址和播放器旧分辨率状态的影响，新增配置
+  `runs/testsrc2/config_pull_stream_unique_4k_20260714.json`，输出地址为
+  `rtmp://192.168.0.168/live/pull_4k_verify_20260714`。
+- 使用同一个 3840×2160 文件测试，板端解码日志、MPP/RTMP 元数据和 SRS API 均确认
+  3840×2160；从独立地址抓取的 FLV 经 ffprobe 仍为 H.264 Main 3840×2160 30 FPS。
+- 抽取实际输出帧后确认画面为完整 16:9 全幅，没有观察到左上角局部裁切。因此当前证据不支持
+  “分辨率配置错误”或“4K 编码链路固定裁切”的结论；优先怀疑复用旧地址时播放器/SRS/解码器
+  沿用旧的 1280×720 SPS/显示状态。详细记录见
+  `docs/4k/pull_stream_unique_4k_frame_probe_20260714.md`。
+- 后续复现必须先用独立地址或停止旧流后重新连接播放器；只有独立地址仍然出现裁切时，才继续
+  排查播放器解码日志及 MPP buffer/stride 生命周期。
+
+## 2026-07-14 4K 18 Mbps 推理推流验证
+
+- 新增 18 Mbps 共享输出配置 `runs/testsrc2/config_pull_stream_18m_shared_output_20260714.json`，
+  使用 `VID_20260712_131410.mp4` 进行 3840×2160 拉流、RKNN 推理、MPP 编码和 RTMP 转推。
+- SRS 确认输入 3840×2160 H.264 High、接收约 18.03 Mbps；共享输出为 3840×2160 H.264 Main，
+  发送约 16.10 Mbps，当前有 2 个客户端。
+- 板端统计约 28.47～28.54 FPS、编码约 16.95 Mbps，`put_fail/out_drop/write_fail` 均为 0、
+  队列为 0；RKNN 推理持续输出目标结果。详细记录见
+  `docs/4k/4k_18m_inference_shared_output_20260714.md`。
+
+## 2026-07-14 config.json 公共配置与差异配置
+
+- `config/config.json` 保存公共的模型、检测、图像处理、MQTT 和标签配置，并通过一个
+  `active_config` 字段选择差异文件。
+- `config/config_v4l2.json` 和 `config/config_4k_18mbps.json` 只维护各自不同的视频源、
+  分辨率、帧率、码率和 RTMP 地址，避免公共配置重复。
+- `src/main.cpp` 启动时按入口 JSON 所在目录加载并递归合并选中的差异 JSON；直接传入完整
+  JSON 的旧方式仍兼容。统一启动命令为 `./AlertGateway config/config.json`。
+
+## 2026-07-14 公共配置与 V4L2 选择器实测
+
+- 使用新二进制和统一入口 `./AlertGateway config/config.json` 完成 V4L2 真机测试，启动日志确认
+  加载 `config/config_v4l2.json`，公共配置和差异配置合并生效。
+- 板端实际协商为 `/dev/video20`、1280×720 YUYV、10 FPS；MPP/RTMP 输出为 H.264 Main
+  1280×720，SRS API 确认共享地址 `/live/v4l2_720p_result` 活跃，`put_fail/out_drop/write_fail`
+  均为 0，推理持续运行。测试日志为 `/tmp/ag_v4l2_config_selector_20260714.log`。
+
+## 2026-07-14 配置分辨率跟随实测
+
+- 用户将板端 `config_v4l2.json` 改为 640×480 后，必须重启程序；运行中的进程不会热加载 JSON，未重启时日志仍显示旧的 1280×720。
+- 重启统一入口 `./AlertGateway config/config.json` 后，日志确认 V4L2 实际协商 640×480 YUYV、`bytesperline=1280`、`sizeimage=614400`、15 FPS；MPP 编码初始化为 640×480，SRS 识别 H.264 Main 640×480。
+- 640×480 RTMP 抓帧为完整单幅画面，无重复图像或额外填充；编码/推流约 15 FPS、约 3 Mbps，`put_fail=0`、`out_drop=0`、`write_fail=0`。测试日志 `/tmp/ag_640x480_config_test_20260714.log`。
+- 本地 `config/config_v4l2.json` 已同步为 640×480；后续修改配置分辨率后仍需重启服务/进程。
+
+## 2026-07-14 201 板 V4L2 720p 当前状态复核
+
+- 201 板当前 `~/AlertGateway/config/config_v4l2.json` 已为 1280×720，运行进程通过统一入口
+  `~/AlertGateway/AlertGateway ~/AlertGateway/config/config.json` 启动，并正确加载该差异配置。
+- 板端日志确认 V4L2、MPP 编码和 RTMP 均为 1280×720；SRS API 与板端 ffprobe 对
+  `/live/v4l2_720p_result` 均确认 H.264 Main 1280×720。因此当前未复现“配置已改但推流仍为
+  640×480”；若修改后未重启，旧进程会继续使用启动时的 640×480 配置。
+- 该摄像头在 1280×720 下实际只协商到 10 FPS，虽请求 15 FPS；这是独立的帧率协商问题，与分辨率无关。
+
+## 2026-07-14 201 板 4K 18 Mbps 配置切换实测
+
+- `config/config.json` 的 `active_config` 已切换为 `config_4k_18mbps.json`，该配置已部署到 201 板。
+- WSL/主机使用 `VID_20260712_131410.mp4` 推送到 `rtmp://192.168.0.168/live/testsrc2`，201 板以
+  `pull_stream` 拉取后完成 RKNN 推理、MPP 编码并输出到 `rtmp://192.168.0.168/live/v4l2_720p_result`。
+- 201 板日志确认输入 3840×2160、MPP 输出 3840×2160、CBR 目标 18000 kbps；稳定窗口输出约
+  30 FPS、约 17.9～18.2 Mbps，`put_fail/out_drop/write_fail` 均为 0，进程正常 `Done` 退出。
+- 本次原始板端日志已保存为 `runs/testsrc2/board_4k_18mbps_active_20260714.log`。测试完成后板端
+  AlertGateway 和 WSL 临时输入发布均已停止；本地入口配置仍保持 4K 选择状态。
+
+## 2026-07-14 201 板 4K 循环查看状态
+
+- 为便于人工查看，曾从 WSL/主机使用 `ffmpeg -re -stream_loop -1` 循环发布同一 4K 文件到
+  `rtmp://192.168.0.168/live/testsrc2`，201 板使用 4K入口配置输出到
+  `rtmp://192.168.0.168/live/v4l2_720p_result`。
+- 循环查看日志再次确认 `active_config=config/config_4k_18mbps.json`、输入和 MPP 输出均为
+  3840×2160，稳定窗口约 30 FPS、约 18 Mbps，`write_fail=0`；日志为
+  `runs/testsrc2/board_4k_loop_20260714.log`。
+- 本次查看会话被用户中断后，201 板端 AlertGateway 和 WSL 输入发布均已停止；本地
+  `config/config.json` 仍保持 4K 选择状态。

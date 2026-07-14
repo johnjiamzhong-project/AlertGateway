@@ -189,54 +189,67 @@ AlertGateway/
 
 ## 配置文件
 
-`config/config.json`：
+`config/config.json` 保存公共配置，并只保留当前要使用的分配置文件名：
 
 ```json
 {
-  "source": {
-    "type": "v4l2",              
-    "device": "/dev/video20",   
-    "url": "",                  
-    "width": 640,
-    "height": 480,
-    "fps": 15
-  },
-  "model": {
-    "path": "model/yolov8s_rockchip_dfl.rknn",
-    "output_layout": "rockchip_dfl",
-    "conf_threshold": 0.25,
-    "iou_threshold": 0.45
-  },
-  "detection": {
-    "target_classes": ["cell phone", "cup", "keyboard", "mouse", "laptop", "book"],
-    "report_interval_sec": 1
-  },
-  "stream": {
-    "rtmp_url": "rtmp://<YOUR_SRS_SERVER_IP>/live/desk",
-    "bitrate_kbps": 2000,
-    "draw_detection_labels": true
-  },
-  "mqtt": {
-    "broker": "<YOUR_MQTT_BROKER_IP>",
-    "port": 1883,
-    "topic": "desk/detect",
-    "client_id": "AlertGateway-01"
-  },
-  "image_processing": {
-    "thumbnail": { "enabled": false, "width": 320, "height": 180, "on_detection_only": true },
-    "roi": {
-      "enabled": false,
-      "regions": [{ "id": "zone_a", "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 }],
-      "filter_outside": true,
-      "track_dwell_sec": 0.0
-    },
-    "tiling": { "enabled": false, "grid_cols": 2, "grid_rows": 1, "overlap_ratio": 0.1, "merge_iou_threshold": 0.45 }
-  }
+  "active_config": "config_4k_18mbps.json",
+  "model": { "path": "model/yolov8s_rockchip_dfl.rknn", "output_layout": "rockchip_dfl", "conf_threshold": 0.25, "iou_threshold": 0.45 },
+  "detection": { "target_classes": ["cell phone", "cup", "keyboard", "mouse", "laptop", "book"], "report_interval_sec": 1 },
+  "stream": { "draw_detection_labels": true },
+  "mqtt": { "broker": "192.168.0.168", "port": 1883, "topic": "desk/detect", "client_id": "AlertGateway-01" }
 }
 ```
 
+两个分配置文件只保存差异项：
+
+- `config/config_v4l2.json`：V4L2 源、640×480、3 Mbps 和对应 RTMP 地址。
+- `config/config_4k_18mbps.json`：4K `pull_stream` 源、3840×2160、18 Mbps 和对应 RTMP 地址。
+
+切换 4K 时只将 `active_config` 改为 `"config_4k_18mbps.json"`。程序会先加载公共配置，
+再递归合并选中的分配置；分辨率、码率、源地址等差异参数只在对应文件中维护。
+
 > `source.type` 可设为 `"v4l2"`（本地摄像头，默认）或 `"pull_stream"`（RTMP/RTSP 拉流）。  
 > 旧版 `camera` 节点继续支持，自动映射为 `source.type=v4l2`，向下兼容。
+
+视频源配置示例：
+
+- V4L2 本地摄像头：将 `active_config` 改为 `config_v4l2.json` 后使用
+  `config/config.json`，或参考 `runs/testsrc2/config_v4l2_720p.json`，配置 `source.type`、
+  `source.device`、分辨率和帧率。
+- RTMP/RTSP 拉流：将 `source.type` 改为 `"pull_stream"`，并填写 `source.url`。
+
+V4L2 的采集分辨率必须是摄像头实际支持的分辨率；当前编码输出尺寸跟随视频源尺寸，
+不会仅通过配置把 V4L2 画面放大为 4K。4K 原始输入目前使用 `pull_stream` 配置。
+
+当前工作区的 `config/config.json` 已选择 `config_4k_18mbps.json`，用于 201 板 4K 测试。
+先将配置部署到 201 板：
+
+```bash
+scp config/config.json config/config_4k_18mbps.json \
+  firefly@192.168.0.201:~/AlertGateway/config/
+```
+
+然后在 WSL/主机循环发布输入文件到 SRS；视频不是直接写入板端，201 板会从该 RTMP 地址拉流：
+
+```bash
+ffmpeg -re -stream_loop -1 \
+  -i runs/input_videos/4k/VID_20260712_131410.mp4 \
+  -map 0:v:0 -c copy -f flv \
+  rtmp://192.168.0.168/live/testsrc2
+```
+
+在 201 板启动处理程序：
+
+```bash
+ssh firefly@192.168.0.201 \
+  'cd ~/AlertGateway && ./AlertGateway config/config.json'
+```
+
+201 板拉取 `live/testsrc2` 输入流，完成 RKNN 推理和 MPP H.264 编码后输出到
+`rtmp://192.168.0.168/live/v4l2_720p_result`，播放器可直接查看该地址。输出流名称保留
+历史上的 `v4l2_720p` 名称，实际尺寸为 3840×2160。恢复 V4L2 测试时，将
+`active_config` 改回 `config_v4l2.json` 并重启程序。
 
 ---
 
@@ -265,9 +278,9 @@ WSL2 交叉编译工具链：
 cmake -B build -DCMAKE_TOOLCHAIN_FILE=cmake/aarch64-toolchain.cmake
 cmake --build build -j$(nproc)
 
-# 传到板子
-scp build/AlertGateway firefly@192.168.0.200:~/AlertGateway/
-scp config/config.json firefly@192.168.0.200:~/AlertGateway/config/
+# 传到 201 板
+scp build/AlertGateway firefly@192.168.0.201:~/AlertGateway/
+scp config/config.json config/config_4k_18mbps.json firefly@192.168.0.201:~/AlertGateway/config/
 ```
 
 如果 sysroot 或 RKNN 链接 stub 不在默认路径，可显式传入：
@@ -286,8 +299,12 @@ cmake -B build \
 ```bash
 # 板子上
 cd ~/AlertGateway
+
+# 唯一启动入口；具体模式由 config/config.json 的 active_config 决定
 ./AlertGateway config/config.json
 ```
+
+启动日志会打印当前加载的分配置路径。配置只在启动时读取；修改分辨率、帧率或码率后需要重启程序，程序仍兼容直接传入完整运行 JSON 文件。
 
 ---
 
@@ -361,7 +378,7 @@ cd ~/AlertGateway
 
 The 4K pull-stream path now forwards decoded source frames to the encoder without the previous pre-encode 30-to-15 FPS pacing. Encoder and stream queues use non-blocking pushes to prevent backpressure from building latency; inference continues in latest-frame mode and may drop stale inference frames.
 
-For 4K testing, stream.bitrate_kbps is configurable with presets: 6000, 12000, and 18000. Preset files are under runs/testsrc2/: config_testsrc2_4k_6m.json, config_testsrc2_4k_12m.json, and config_testsrc2_4k_18m.json. The V4L2 production config/config.json remains unchanged.
+For 4K testing, stream.bitrate_kbps is configurable with presets: 6000, 12000, and 18000. Preset files are under runs/testsrc2/: config_testsrc2_4k_6m.json, config_testsrc2_4k_12m.json, and config_testsrc2_4k_18m.json. The current workspace entry config selects config_4k_18mbps.json; restore the V4L2 configuration by selecting config_v4l2.json.
 
 Corrected 30 FPS 12/18 Mbps board validation: 12 Mbps measured 12007.9 kbps at 29.99 FPS; 18 Mbps measured 18087.0 kbps at 30.08 FPS. Both had zero write failures and zero queue depth. In the aligned single-frame quality sample, PSNR was 28.4200/28.4099 dB and SSIM was 0.5735/0.5813 for 12/18 Mbps respectively. Full captures and logs are in runs/testsrc2/quality_compare_12v18_20260714/.
 

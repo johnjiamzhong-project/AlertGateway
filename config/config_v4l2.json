@@ -1,0 +1,13 @@
+{
+  "source": {
+    "type": "v4l2",
+    "device": "/dev/video20",
+    "width": 640,
+    "height": 480,
+    "fps": 15
+  },
+  "stream": {
+    "rtmp_url": "rtmp://192.168.0.168/live/v4l2_720p_result",
+    "bitrate_kbps": 3000
+  }
+}

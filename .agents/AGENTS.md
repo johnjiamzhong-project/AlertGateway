@@ -51,3 +51,4 @@ scp config/config.json firefly@192.168.0.200:~/AlertGateway/config/
 
 ## 4. Git 提交与推送规范
 * **非主动提交原则**：在任何情况下，AI 助手**绝对不能**在没有得到用户明确授权或明确指示的前提下，擅自执行 `git commit` 或 `git push` 命令。所有产生的修改应保持在工作区（staged 或 unstaged）状态，等待用户自行决定并执行提交。
+* **提交信息语言**：本项目的 `git commit` message 必须使用中文，标题和正文均应清晰说明本次变更内容。

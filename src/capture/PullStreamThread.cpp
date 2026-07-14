@@ -1,12 +1,14 @@
 #include "capture/PullStreamThread.hpp"
 #include <iostream>
 #include <chrono>
+#include <cmath>
 
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/time.h>
+#include <libavutil/mathematics.h>
 }
 
 // 格式转换辅助：将 AV_PIX_FMT_YUV420P 转换为 NV12 (YUV420SP)
@@ -81,6 +83,13 @@ void PullStreamThread::run() {
     int video_stream_idx = -1;
     AVPacket* packet = av_packet_alloc();
     AVFrame* frame = av_frame_alloc();
+    uint64_t decoded_frames = 0;
+    uint64_t enc_pushed = 0;
+    uint64_t enc_dropped = 0;
+    uint64_t infer_pushed = 0;
+    uint64_t infer_dropped = 0;
+    uint64_t paced_dropped = 0;
+    auto stats_t = std::chrono::steady_clock::now();
 
     while (running_) {
         // 1. 尝试打开输入流
@@ -135,6 +144,8 @@ void PullStreamThread::run() {
             continue;
         }
 
+        AVStream* video_stream = format_ctx->streams[video_stream_idx];
+
         // 4. 配置解码器上下文
         codec_ctx = avcodec_alloc_context3(codec);
         if (!codec_ctx) {
@@ -167,7 +178,23 @@ void PullStreamThread::run() {
                   << codec_ctx->width << "x" << codec_ctx->height
                   << ", Format: " << av_get_pix_fmt_name(codec_ctx->pix_fmt) << "\n" << std::flush;
 
+        double source_fps = 0.0;
+        if (video_stream->avg_frame_rate.den > 0) {
+            source_fps = av_q2d(video_stream->avg_frame_rate);
+        } else if (video_stream->r_frame_rate.den > 0) {
+            source_fps = av_q2d(video_stream->r_frame_rate);
+        }
+        int target_fps = cfg_.fps;
+        int frame_step = 1;
+        if (source_fps > 0.0 && target_fps > 0) {
+            frame_step = std::max(1, (int)std::round(source_fps / target_fps));
+        }
+        std::cout << "[PullStream] source_fps=" << (int)std::round(source_fps)
+                  << " target_fps=" << target_fps
+                  << " frame_step=" << frame_step << "\n" << std::flush;
+
         // 5. 解码主循环
+        uint64_t frame_index = 0;
         while (running_) {
             ret = av_read_frame(format_ctx, packet);
             if (ret < 0) {
@@ -199,6 +226,15 @@ void PullStreamThread::run() {
                         av_frame_unref(frame);
                         continue;
                     }
+                    ++decoded_frames;
+
+                    frame_index++;
+                    if (frame_step > 1 && (frame_index % frame_step != 0)) {
+                        ++paced_dropped;
+                        av_frame_unref(frame);
+                        continue;
+                    }
+
                     size_t frame_size = w * h * 3 / 2; // NV12 格式占用字节数
 
                     Frame frame_obj;
@@ -227,12 +263,31 @@ void PullStreamThread::run() {
 
                     // 阻塞投递编码线程（保证流畅，形成背压）
                     if (running_) {
-                        enc_queue_.push(frame_obj, 100);
+                        if (enc_queue_.push(frame_obj, 0)) ++enc_pushed;
+                        else ++enc_dropped;
                     }
 
                     // 非阻塞投递推理线程（推理慢时主动丢帧）
                     if (running_) {
-                        infer_queue_.push(std::move(frame_obj), 0);
+                        if (infer_queue_.push(std::move(frame_obj), 0)) ++infer_pushed;
+                        else ++infer_dropped;
+                    }
+
+                    auto now = std::chrono::steady_clock::now();
+                    const double elapsed = std::chrono::duration<double>(now - stats_t).count();
+                    if (elapsed >= 10.0) {
+                        std::cout << "[PullStats] input_fps=" << (decoded_frames / elapsed)
+                                  << " decoded=" << decoded_frames
+                                  << " enc_push=" << enc_pushed
+                                  << " enc_drop=" << enc_dropped
+                                  << " infer_push=" << infer_pushed
+                                  << " infer_drop=" << infer_dropped
+                                  << " pace_drop=" << paced_dropped
+                                  << " queues=" << enc_queue_.size() << "/" << infer_queue_.size()
+                                  << "\n" << std::flush;
+                        decoded_frames = enc_pushed = enc_dropped = 0;
+                        infer_pushed = infer_dropped = paced_dropped = 0;
+                        stats_t = now;
                     }
                 }
             }

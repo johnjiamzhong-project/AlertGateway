@@ -236,6 +236,10 @@ void StreamThread::reconnect_loop() {
 void StreamThread::run() {
     using clk = std::chrono::steady_clock;
     auto last_ok = clk::now();
+    uint64_t written_packets = 0;
+    uint64_t written_bytes = 0;
+    uint64_t write_failures = 0;
+    auto stats_t = clk::now();
 
     while (running_) {
         EncodedPacket ep;
@@ -252,11 +256,25 @@ void StreamThread::run() {
         }
 
         if (!write_packet(ep)) {
+            ++write_failures;
             std::cerr << "StreamThread: write failed, reconnecting...\n";
             reconnect_loop();
             last_ok = clk::now();
         } else {
+            ++written_packets;
+            written_bytes += ep.data.size();
             last_ok = clk::now();
+        }
+
+        const double elapsed = std::chrono::duration<double>(clk::now() - stats_t).count();
+        if (elapsed >= 10.0) {
+            std::cerr << "[StreamStats] output_fps=" << (written_packets / elapsed)
+                      << " bitrate_kbps=" << (written_bytes * 8.0 / elapsed / 1000.0)
+                      << " write_fail=" << write_failures
+                      << " queue=" << in_queue_.size()
+                      << "\n" << std::flush;
+            written_packets = written_bytes = write_failures = 0;
+            stats_t = clk::now();
         }
     }
 }

@@ -1,31 +1,9 @@
 {
-  "source": {
-    "type": "v4l2",
-    "device": "/dev/video20",
-    "width": 640,
-    "height": 480,
-    "fps": 15
-  },
+  "active_config": "config_4k_18mbps.json",
   "image_processing": {
-    "thumbnail": {
-      "enabled": false,
-      "width": 320,
-      "height": 180,
-      "on_detection_only": true
-    },
-    "roi": {
-      "enabled": false,
-      "regions": [],
-      "filter_outside": true,
-      "track_dwell_sec": 0
-    },
-    "tiling": {
-      "enabled": false,
-      "grid_cols": 2,
-      "grid_rows": 1,
-      "overlap_ratio": 0.10,
-      "merge_iou_threshold": 0.45
-    }
+    "thumbnail": {"enabled": false, "width": 320, "height": 180, "on_detection_only": true},
+    "roi": {"enabled": false, "regions": [], "filter_outside": true, "track_dwell_sec": 0},
+    "tiling": {"enabled": false, "grid_cols": 2, "grid_rows": 1, "overlap_ratio": 0.1, "merge_iou_threshold": 0.45}
   },
   "model": {
     "path": "model/yolov8s_rockchip_dfl.rknn",
@@ -38,8 +16,6 @@
     "report_interval_sec": 1
   },
   "stream": {
-    "rtmp_url": "rtmp://192.168.0.168/live/desk",
-    "bitrate_kbps": 2000,
     "draw_detection_labels": true
   },
   "mqtt": {

@@ -1,0 +1,14 @@
+{
+  "source": {
+    "type": "pull_stream",
+    "url": "rtmp://192.168.0.168/live/testsrc2",
+    "width": 3840,
+    "height": 2160,
+    "fps": 30,
+    "reconnect_sec": 5
+  },
+  "stream": {
+    "rtmp_url": "rtmp://192.168.0.168/live/v4l2_720p_result",
+    "bitrate_kbps": 18000
+  }
+}

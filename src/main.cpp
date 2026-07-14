@@ -4,6 +4,7 @@
 #include <thread>
 #include <chrono>
 #include <fstream>
+#include <filesystem>
 #include <nlohmann/json.hpp>
 
 #include "common/BlockingQueue.hpp"
@@ -24,16 +25,50 @@ static std::atomic<bool> g_running{true};
 
 static void on_signal(int) { g_running = false; }
 
+static void merge_json(json& base, const json& override_cfg) {
+    if (!base.is_object() || !override_cfg.is_object()) {
+        base = override_cfg;
+        return;
+    }
+    for (const auto& [key, value] : override_cfg.items()) {
+        if (base.contains(key) && base[key].is_object() && value.is_object()) {
+            merge_json(base[key], value);
+        } else {
+            base[key] = value;
+        }
+    }
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <config.json>\n";
         return 1;
     }
 
-    std::ifstream f(argv[1]);
+    const std::filesystem::path entry_config_path(argv[1]);
+    std::ifstream f(entry_config_path);
     if (!f) { std::cerr << "Cannot open config: " << argv[1] << "\n"; return 1; }
     json cfg;
     f >> cfg;
+
+    // 入口配置保存公共字段和 active_config；选中的 JSON 只覆盖差异字段。
+    // 仍兼容直接传入完整运行配置的旧用法。
+    if (cfg.contains("active_config")) {
+        const std::string selected_name = cfg["active_config"].get<std::string>();
+        std::filesystem::path selected_path(selected_name);
+        if (selected_path.is_relative()) {
+            selected_path = entry_config_path.parent_path() / selected_path;
+        }
+        std::ifstream selected_file(selected_path);
+        if (!selected_file) {
+            std::cerr << "Cannot open selected config: " << selected_path.string() << "\n";
+            return 1;
+        }
+        json selected_cfg;
+        selected_file >> selected_cfg;
+        merge_json(cfg, selected_cfg);
+        std::cout << "[Config] active_config=" << selected_path.string() << "\n";
+    }
 
     // 视频源配置：V4L2 本地摄像头或 FFmpeg 拉流
     std::string source_type = "v4l2";

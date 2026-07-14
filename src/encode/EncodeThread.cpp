@@ -262,29 +262,31 @@ void EncodeThread::draw_solid_rect_nv12(uint8_t* nv12, int w, int h,
 
 void EncodeThread::draw_char_nv12(uint8_t* nv12, int w, int h,
                                    int x, int y, char ch,
-                                   uint8_t text_y, uint8_t text_u, uint8_t text_v) {
+                                   uint8_t text_y, uint8_t text_u, uint8_t text_v,
+                                   int scale) {
     if (ch < 0 || ch >= 128) return;
+    scale = std::max(1, scale);
 
     const unsigned char* glyph = font8x16[static_cast<int>(ch)];
     uint8_t* y_plane  = nv12;
     uint8_t* uv_plane = nv12 + w * h;
 
     for (int r = 0; r < 16; ++r) {
-        int py = y + r;
-        if (py < 0 || py >= h) continue;
-
         unsigned char row_val = glyph[r];
         for (int c = 0; c < 8; ++c) {
-            int px = x + c;
-            if (px < 0 || px >= w) continue;
-
-            if ((row_val >> (7 - c)) & 1) {
-                y_plane[py * w + px] = text_y;
-
-                int uy = py >> 1;
-                int ux = px & ~1;
-                uv_plane[uy * w + ux]     = text_u;
-                uv_plane[uy * w + ux + 1] = text_v;
+            if (!((row_val >> (7 - c)) & 1)) continue;
+            for (int sy = 0; sy < scale; ++sy) {
+                int py = y + r * scale + sy;
+                if (py < 0 || py >= h) continue;
+                for (int sx = 0; sx < scale; ++sx) {
+                    int px = x + c * scale + sx;
+                    if (px < 0 || px >= w) continue;
+                    y_plane[py * w + px] = text_y;
+                    int uy = py >> 1;
+                    int ux = px & ~1;
+                    uv_plane[uy * w + ux] = text_u;
+                    uv_plane[uy * w + ux + 1] = text_v;
+                }
             }
         }
     }
@@ -292,7 +294,9 @@ void EncodeThread::draw_char_nv12(uint8_t* nv12, int w, int h,
 
 void EncodeThread::draw_chinese_char_nv12(uint8_t* nv12, int w, int h,
                                            int x, int y, const std::string& chinese_char,
-                                           uint8_t text_y, uint8_t text_u, uint8_t text_v) {
+                                           uint8_t text_y, uint8_t text_u, uint8_t text_v,
+                                           int scale) {
+    scale = std::max(1, scale);
     const uint8_t* glyph = nullptr;
     for (const auto& item : font16x16) {
         if (item.utf8 == chinese_char) {
@@ -306,34 +310,23 @@ void EncodeThread::draw_chinese_char_nv12(uint8_t* nv12, int w, int h,
     uint8_t* uv_plane = nv12 + w * h;
 
     for (int r = 0; r < 16; ++r) {
-        int py = y + r;
-        if (py < 0 || py >= h) continue;
-
         uint8_t b1 = glyph[r * 2];
         uint8_t b2 = glyph[r * 2 + 1];
-
-        for (int c = 0; c < 8; ++c) {
-            int px = x + c;
-            if (px < 0 || px >= w) continue;
-
-            if ((b1 >> (7 - c)) & 1) {
-                y_plane[py * w + px] = text_y;
-                int uy = py >> 1;
-                int ux = px & ~1;
-                uv_plane[uy * w + ux]     = text_u;
-                uv_plane[uy * w + ux + 1] = text_v;
-            }
-        }
-        for (int c = 0; c < 8; ++c) {
-            int px = x + 8 + c;
-            if (px < 0 || px >= w) continue;
-
-            if ((b2 >> (7 - c)) & 1) {
-                y_plane[py * w + px] = text_y;
-                int uy = py >> 1;
-                int ux = px & ~1;
-                uv_plane[uy * w + ux]     = text_u;
-                uv_plane[uy * w + ux + 1] = text_v;
+        for (int c = 0; c < 16; ++c) {
+            bool set = c < 8 ? ((b1 >> (7 - c)) & 1) : ((b2 >> (15 - c)) & 1);
+            if (!set) continue;
+            for (int sy = 0; sy < scale; ++sy) {
+                int py = y + r * scale + sy;
+                if (py < 0 || py >= h) continue;
+                for (int sx = 0; sx < scale; ++sx) {
+                    int px = x + c * scale + sx;
+                    if (px < 0 || px >= w) continue;
+                    y_plane[py * w + px] = text_y;
+                    int uy = py >> 1;
+                    int ux = px & ~1;
+                    uv_plane[uy * w + ux] = text_u;
+                    uv_plane[uy * w + ux + 1] = text_v;
+                }
             }
         }
     }
@@ -341,22 +334,25 @@ void EncodeThread::draw_chinese_char_nv12(uint8_t* nv12, int w, int h,
 
 void EncodeThread::draw_string_nv12(uint8_t* nv12, int w, int h,
                                      int x, int y, const std::string& str,
-                                     uint8_t text_y, uint8_t text_u, uint8_t text_v) {
+                                     uint8_t text_y, uint8_t text_u, uint8_t text_v,
+                                     int scale) {
+    scale = std::max(1, scale);
     int cur_x = x;
     size_t i = 0;
     while (i < str.length()) {
         unsigned char c = str[i];
         if ((c & 0x80) == 0) {
-            draw_char_nv12(nv12, w, h, cur_x, y, c, text_y, text_u, text_v);
-            cur_x += 8;
+            draw_char_nv12(nv12, w, h, cur_x, y, c, text_y, text_u, text_v, scale);
+            cur_x += 8 * scale;
             i += 1;
         } else if ((c & 0xE0) == 0xC0) {
             i += 2;
         } else if ((c & 0xF0) == 0xE0) {
             if (i + 2 < str.length()) {
                 std::string chinese_char = str.substr(i, 3);
-                draw_chinese_char_nv12(nv12, w, h, cur_x, y, chinese_char, text_y, text_u, text_v);
-                cur_x += 16;
+                draw_chinese_char_nv12(nv12, w, h, cur_x, y, chinese_char,
+                                       text_y, text_u, text_v, scale);
+                cur_x += 16 * scale;
             }
             i += 3;
         } else if ((c & 0xF0) == 0xF0) {
@@ -367,18 +363,19 @@ void EncodeThread::draw_string_nv12(uint8_t* nv12, int w, int h,
     }
 }
 
-static int get_string_display_width(const std::string& str) {
+static int get_string_display_width(const std::string& str, int scale) {
+    scale = std::max(1, scale);
     int w = 0;
     size_t i = 0;
     while (i < str.length()) {
         unsigned char c = str[i];
         if ((c & 0x80) == 0) {
-            w += 8;
+            w += 8 * scale;
             i += 1;
         } else if ((c & 0xE0) == 0xC0) {
             i += 2;
         } else if ((c & 0xF0) == 0xE0) {
-            w += 16;
+            w += 16 * scale;
             i += 3;
         } else if ((c & 0xF0) == 0xF0) {
             i += 4;
@@ -392,11 +389,12 @@ static int get_string_display_width(const std::string& str) {
 void EncodeThread::draw_detection_label_nv12(uint8_t* nv12, int w, int h,
                                               int x1, int y1, int x2, int y2,
                                               const std::string& label_str) {
-    int text_w = get_string_display_width(label_str);
-    int text_h = 16;
+    const int text_scale = std::max(w, h) >= 3000 ? 2 : 1;
+    int text_w = get_string_display_width(label_str, text_scale);
+    int text_h = 16 * text_scale;
 
-    int pad_x = 2;
-    int pad_y = 2;
+    int pad_x = 2 * text_scale;
+    int pad_y = 2 * text_scale;
     int strip_w = text_w + pad_x * 2;
     int strip_h = text_h + pad_y * 2;
 
@@ -428,7 +426,7 @@ void EncodeThread::draw_detection_label_nv12(uint8_t* nv12, int w, int h,
 
     int text_x = strip_x1 + pad_x;
     int text_y = strip_y1 + pad_y;
-    draw_string_nv12(nv12, w, h, text_x, text_y, label_str, TXT_Y, TXT_U, TXT_V);
+    draw_string_nv12(nv12, w, h, text_x, text_y, label_str, TXT_Y, TXT_U, TXT_V, text_scale);
 }
 
 // 编码线程主循环，start() 起的线程跑的就是这个函数，running_ 为 false 时退出。
@@ -455,13 +453,20 @@ void EncodeThread::run() {
     // 绿色在BT.601 YCbCr下对应：Y=145, Cb=54, Cr=34
     constexpr uint8_t BOX_Y = 145, BOX_U = 54, BOX_V = 34;
 
-    int    fps_count = 0;
-    auto   fps_t = std::chrono::steady_clock::now();
+    uint64_t input_frames = 0;
+    uint64_t encoded_packets = 0;
+    uint64_t encoded_bytes = 0;
+    uint64_t out_dropped = 0;
+    uint64_t put_failures = 0;
+    uint64_t processing_us = 0;
+    auto stats_t = std::chrono::steady_clock::now();
 
     while (running_) {
         Frame frame;
         if (!in_queue_.pop(frame, 200)) continue;
         if (frame.raw_data.empty()) continue;
+        const auto frame_t = std::chrono::steady_clock::now();
+        ++input_frames;
 
         // 先从 DRM 池取 buffer，让 RGA 转换结果直接写入，省掉一次 memcpy
         MppBuffer frame_buf = nullptr;
@@ -538,6 +543,7 @@ void EncodeThread::run() {
         mpp_buffer_put(frame_buf);
         if (ret != MPP_OK) {
             std::cerr << "[Encode] encode_put_frame failed: " << ret << "\n";
+            ++put_failures;
             continue;
         }
         frame_idx_++;
@@ -569,18 +575,32 @@ void EncodeThread::run() {
             }
             ep.data.assign(static_cast<uint8_t*>(data),
                            static_cast<uint8_t*>(data) + len);
+            ++encoded_packets;
+            encoded_bytes += len;
             mpp_packet_deinit(&packet);
-            out_queue_.push(std::move(ep), 200);
+            if (!out_queue_.push(std::move(ep), 0)) ++out_dropped;
             packet = nullptr;
         }
 
-        // 每10秒打印一次实际编码帧率，方便排查是否跟摄像头帧率/配置的fps一致
-        fps_count++;
+        processing_us += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - frame_t).count());
         auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::seconds>(now - fps_t).count() >= 10) {
-            std::cerr << "Encode: " << fps_count / 10.0f << " fps\n" << std::flush;
-            fps_count = 0;
-            fps_t = now;
+        const double elapsed = std::chrono::duration<double>(now - stats_t).count();
+        if (elapsed >= 10.0) {
+            const double avg_ms = input_frames == 0 ? 0.0
+                : (processing_us / 1000.0) / static_cast<double>(input_frames);
+            std::cerr << "[EncodeStats] input_fps=" << (input_frames / elapsed)
+                      << " packet_fps=" << (encoded_packets / elapsed)
+                      << " bitrate_kbps=" << (encoded_bytes * 8.0 / elapsed / 1000.0)
+                      << " avg_process_ms=" << avg_ms
+                      << " put_fail=" << put_failures
+                      << " out_drop=" << out_dropped
+                      << " queue=" << out_queue_.size()
+                      << "\n" << std::flush;
+            input_frames = encoded_packets = encoded_bytes = out_dropped = put_failures = 0;
+            processing_us = 0;
+            stats_t = now;
         }
     }
 }
