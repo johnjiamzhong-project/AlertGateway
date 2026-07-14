@@ -502,7 +502,7 @@ V4L2摄像头采集
 
 ## 2026-07-11 新开发方向：单路 4K 拉流 + 图像处理
 
-架构设计已确认，文档位于 `docs/4k_pull_stream_image_processing_plan.md`，后续开发以其为准。
+架构设计已确认，文档位于 `docs/4k/4k_pull_stream_image_processing_plan.md`，后续开发以其为准。
 
 ### 核心决策
 
@@ -769,3 +769,66 @@ User confirmed not to implement V4L2 MJPEG now. Keep current YUYV behavior uncha
 
 Manual playback verification completed. rambosplayer successfully displayed the board output stream from SRS at
 tmp://192.168.0.168/live/testsrc2_result. The stream corresponds to the 3840x2160 4K test input and confirms the end-to-end path: WSL publisher -> SRS -> board pull/inference/MPP encode -> SRS output -> rambosplayer. This is an additional visual confirmation for stage-one/stage-two acceptance. V4L2 MJPEG and 720p@15/30 remain deferred enhancements.
+
+## 2026-07-13 4K pull/process/push stutter and quality baseline
+
+- Reproduced the reported 4K path on board 192.168.0.200 using VID_20260712_131410.mp4 (3840x2160, about 30.03 FPS, about 42.8 Mbps) through SRS 192.168.0.168.
+- With config_testsrc2_4k.json, the board pulled and decoded 3840x2160 yuvj420p, ran RKNN and MPP continuously, and exited cleanly. Inference totals were about 36.5-49.1 ms/frame; NPU about 25.8-29.2 ms.
+- An 18-second capture of testsrc2_result measured 3840x2160 H.264, nominal 15 FPS, average about 15.17 FPS, and about 3.11 Mbps. The very low 3 Mbps 4K output bitrate is a confirmed quality-loss factor; frame pacing/jitter remains to be measured separately.
+- Detailed record: docs/4k/4k_pull_stream_reproduction_20260713.md; raw board log and metrics are under runs/testsrc2/. No implementation changes were made for this issue.
+
+## 2026-07-13 4K frame pacing fix and 6 Mbps verification
+
+- Instrumentation was added to PullStreamThread, EncodeThread, and StreamThread for 10-second input/output FPS, queue depth, drop, write-failure, processing-time, and bitrate summaries.
+- The first 6 Mbps run confirmed the mismatch: source and encoder/RTMP packet rates were about 30 FPS while the configured target was 15 FPS.
+- PullStreamThread now uses the input stream frame rate to compute a frame-step limiter; for 30 FPS input and 15 FPS target it keeps one frame out of every two. PTS gating remains the fallback when input rate is unknown or not above target.
+- Board verification after the fix: source about 30.07-30.13 FPS, encoded/RTMP output about 14.97-15.02 FPS, actual bitrate about 5.92-5.98 Mbps, queues remained 0, and encode/output/write failure counters stayed at 0.
+- Detailed record: docs/4k/4k_framerate_fix_20260713.md; isolated 6 Mbps config: runs/testsrc2/config_testsrc2_4k_6m.json. Next action is 6/8/12 Mbps visual quality comparison while retaining the fixed pacing.
+
+## 2026-07-13 4K bitrate matrix after frame pacing
+
+- Completed fixed-pacing bitrate matrix at 3/6/8/12 Mbps using the same 3840x2160 input and 15 FPS target. All stable windows stayed around 15.03-15.05 FPS with zero encode/output/write failures and zero queue depth.
+- Measured output bitrates were approximately 3.16, 5.98, 7.94, and 11.87 Mbps respectively; stable stream statistics tracked the targets closely.
+- 8 Mbps was independently rerun after an interrupted matrix publisher and completed successfully. No production bitrate was selected yet because visual quality inspection is still required. Detailed matrix: docs/4k/4k_bitrate_matrix_20260713.md.
+
+## 2026-07-13 4K bitrate visual comparison preparation
+
+- Extracted 1-second frames from the 3/6/8/12 Mbps captures and found a common desk scene across the four runs; comparison artifacts are under runs/testsrc2/quality_compare_20260713/.
+- The earlier 5-second screenshots were not same-scene because each publisher started at a different capture offset and must not be used for a strict quality conclusion.
+- Initial inspection indicates 3 Mbps has the most visible compression, 6 Mbps is materially better, and the incremental gain from 8 to 12 Mbps is smaller. This remains a preliminary observation because motion and capture offset still need to be eliminated.
+- Keep the production configuration at 3 Mbps. Next action is one strictly synchronized 6-vs-8 Mbps run before selecting a production bitrate.
+
+## 2026-07-13 synchronized 6/8 Mbps verification
+
+- Added tools/test/run_4k_sync_compare_6v8_20260713.sh and ran synchronized 4K 6 Mbps and 8 Mbps cases with the same source, 15 FPS target, and board binary.
+- 6 Mbps valid capture: 15.93 seconds, 3840x2160 H.264, about 5.83 Mbps overall capture rate; stable EncodeStats/StreamStats around 15.03 FPS and 5.96 Mbps, queues/failures zero.
+- The first synchronized 8 Mbps attempt was invalid because the source RTMP publisher broke immediately after the previous session. It was rerun independently.
+- 8 Mbps retry valid capture: 15.53 seconds, 3840x2160 H.264, about 8.04 Mbps overall capture rate; stable EncodeStats/StreamStats around 14.89 FPS and 8.00 Mbps, queues/failures zero.
+- Same-time screenshots were extracted under runs/testsrc2/quality_compare_20260713/. The two runs are stable, but source motion still prevents a pixel-perfect visual score; keep production at 3 Mbps until final human review selects 6 or 8 Mbps.
+
+## 2026-07-13 4K 6 Mbps acceptance and production-config correction
+
+- The checked-in config/config.json and board production config are V4L2 camera configurations, not the 4K pull-stream path. An attempted 6 Mbps production verification used the wrong source and was discarded.
+- Restored the original V4L2 configurations (local config bitrate 2000 kbps; board config backup restored at 3000 kbps). The board's original config is preserved as config/config.pre_6m_20260713.json.
+- Added docs/4k/4k_6m_acceptance_20260713.md and ran the dedicated 4K pull-stream 6 Mbps acceptance with config_testsrc2_4k_6m.json.
+- Valid 51.933-second capture: 3840x2160 H.264, about 6.03 Mbps, nominal 15 FPS and average 15.17 FPS. Stable windows were 14.86-15.17 FPS and 5.91-6.08 Mbps; queues returned to zero and put_fail/out_drop/write_fail remained zero.
+- Do not change the V4L2 production bitrate based on this test. Treat 6 Mbps as the validated 4K pull-stream candidate; any production switch requires a separate decision about changing the production source path.
+
+## 2026-07-14 4K detection-label scaling
+
+- Detection label rendering in EncodeThread was fixed at 8x16 ASCII / 16x16 Chinese glyphs, which is too small on a 3840x2160 display.
+- Added resolution-aware integer scaling: 4K frames use 2x glyphs (about 32 px high), while 1080p and below keep the original size. Background strip padding and text width now scale with the glyphs.
+- Cross-build passed. Deployed the updated test binary as ~/AlertGateway/AlertGateway.labels_20260714 and restarted the live 4K 6 Mbps test stream. A verification frame is saved at runs/testsrc2/quality_compare_20260713/frame_labels_4k_2x_20260714.png.
+- Existing V4L2 production configuration was not changed.
+
+## 2026-07-14 4K 12 Mbps vs 18 Mbps quality comparison
+
+- Completed the strictly synchronized 4K 12 Mbps vs 18 Mbps video quality comparison under `runs/testsrc2/quality_compare_12v18_20260714/`.
+- Both runs successfully completed at 15 FPS: 12 Mbps output average rate was 11.94 Mbps, 18 Mbps was 17.98 Mbps. Board stats showed zero queue build-ups and zero encode/drop/write failures.
+- Frame alignment was performed dynamically using downsampled MSE search, mapping frame 100 in outputs to frame 195 in the 30 FPS source video.
+- Calculated grayscale PSNR/SSIM for 12 Mbps were 28.2893 dB / 0.5514, and for 18 Mbps were 28.2878 dB / 0.5505.
+- Detailed report and side-by-side comparison images are stored in [README.md](file:///home/rambos/arm_test/AlertGateway/runs/testsrc2/quality_compare_12v18_20260714/README.md).
+
+## 2026-07-14 corrected 30 FPS 12/18 Mbps quality comparison
+
+The first automated 12/18 Mbps report was invalid because it used the old AlertGateway binary and board configs at 15 FPS. The corrected run uses AlertGateway.maxfps_20260714 with 30 FPS configs. 12 Mbps measured 12007.9 kbps, 29.99 FPS, PSNR 28.4200 dB, SSIM 0.5735; 18 Mbps measured 18087.0 kbps, 30.08 FPS, PSNR 28.4099 dB, SSIM 0.5813. Both had zero write failures and zero queue depth. 18 Mbps has a small SSIM advantage in this single aligned frame; PSNR is effectively tied, so 12 Mbps remains a valid bandwidth-efficient setting. Artifacts: runs/testsrc2/quality_compare_12v18_20260714/.

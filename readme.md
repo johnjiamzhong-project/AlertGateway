@@ -354,3 +354,17 @@ cd ~/AlertGateway
 ## License
 
 本项目代码以 MIT License 开源，见 `LICENSE`。`third_party/` 下的头文件（RKNN、MPP、RGA、Paho MQTT、nlohmann/json）保留各自上游的原始授权条款。
+
+
+
+## 2026-07-14 4K pull-stream output and bitrate validation
+
+The 4K pull-stream path now forwards decoded source frames to the encoder without the previous pre-encode 30-to-15 FPS pacing. Encoder and stream queues use non-blocking pushes to prevent backpressure from building latency; inference continues in latest-frame mode and may drop stale inference frames.
+
+For 4K testing, stream.bitrate_kbps is configurable with presets: 6000, 12000, and 18000. Preset files are under runs/testsrc2/: config_testsrc2_4k_6m.json, config_testsrc2_4k_12m.json, and config_testsrc2_4k_18m.json. The V4L2 production config/config.json remains unchanged.
+
+Corrected 30 FPS 12/18 Mbps board validation: 12 Mbps measured 12007.9 kbps at 29.99 FPS; 18 Mbps measured 18087.0 kbps at 30.08 FPS. Both had zero write failures and zero queue depth. In the aligned single-frame quality sample, PSNR was 28.4200/28.4099 dB and SSIM was 0.5735/0.5813 for 12/18 Mbps respectively. Full captures and logs are in runs/testsrc2/quality_compare_12v18_20260714/.
+
+Detailed test record: docs/4k/4k_30fps_bitrate_validation_20260714.md
+
+4K document index: docs/4k/README.md
