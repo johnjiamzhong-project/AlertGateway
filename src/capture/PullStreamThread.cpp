@@ -78,6 +78,7 @@ void PullStreamThread::stop() {
 }
 
 void PullStreamThread::run() {
+    uint64_t next_frame_id = 0;
     AVCodecContext* codec_ctx = nullptr;
     const AVCodec* codec = nullptr;
     int video_stream_idx = -1;
@@ -240,10 +241,12 @@ void PullStreamThread::run() {
                     Frame frame_obj;
                     frame_obj.width = w;
                     frame_obj.height = h;
+                    frame_obj.frame_id = ++next_frame_id;
                     frame_obj.pixel_format = PixelFormat::NV12;
                     frame_obj.raw_data.resize(frame_size);
-                    frame_obj.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    frame_obj.pts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now().time_since_epoch()).count();
+                    frame_obj.timestamp_ms = frame_obj.pts_ms;
 
                     // 根据 FFmpeg 吐出的帧格式做对应格式转换/拷贝
                     if (frame->format == AV_PIX_FMT_YUV420P || frame->format == AV_PIX_FMT_YUVJ420P) {
@@ -269,8 +272,13 @@ void PullStreamThread::run() {
 
                     // 非阻塞投递推理线程（推理慢时主动丢帧）
                     if (running_) {
-                        if (infer_queue_.push(std::move(frame_obj), 0)) ++infer_pushed;
-                        else ++infer_dropped;
+                        size_t replaced = 0;
+                        if (infer_queue_.push_latest(std::move(frame_obj), &replaced)) {
+                            ++infer_pushed;
+                            infer_dropped += replaced;
+                        } else {
+                            ++infer_dropped;
+                        }
                     }
 
                     auto now = std::chrono::steady_clock::now();

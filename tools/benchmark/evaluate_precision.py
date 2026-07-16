@@ -68,47 +68,54 @@ def postprocess_decoded(outputs, orig_w, orig_h, model_w, model_h, conf_thresh, 
     # outputs[1]: class_probs (1, 80, 8400) (ONNX 图里已经过 Sigmoid)
     boxes = outputs[0][0] # (4, 8400)
     cls_probs = outputs[1][0] # (80, 8400)
-    
+
     n_anchors = boxes.shape[1]
     sx = orig_w / float(model_w)
     sy = orig_h / float(model_h)
-    
+
     candidates = []
     for a in range(n_anchors):
         # 寻找最高分类别
         best_score = -1.0
         best_class = -1
-        for c in range(80):
+        num_classes = cls_probs.shape[0]
+        for c in range(num_classes):
             score = cls_probs[c, a]
             if score > best_score:
                 best_score = score
                 best_class = c
-                
+
         if best_score < conf_thresh:
             continue
-            
-        label = CLASSES[best_class]
+
+        if num_classes == 6:
+            label = TARGET_CLASSES[best_class]
+            coco_class_id = TARGET_IDS[best_class]
+        else:
+            label = CLASSES[best_class]
+            coco_class_id = best_class
+
         # 只保留 6 类目标
         if label not in TARGET_CLASSES:
             continue
-            
+
         cx = boxes[0, a]
         cy = boxes[1, a]
         w = boxes[2, a]
         h = boxes[3, a]
-        
+
         x1 = (cx - w * 0.5) * sx
         y1 = (cy - h * 0.5) * sy
         x2 = (cx + w * 0.5) * sx
         y2 = (cy + h * 0.5) * sy
-        
+
         candidates.append({
-            "class_id": best_class,
+            "class_id": coco_class_id,
             "label": label,
             "score": float(best_score),
             "box": [x1, y1, x2, y2]
         })
-        
+
     return nms(candidates, iou_thresh)
 
 # (2) rockchip_dfl 九输出后处理
@@ -117,16 +124,16 @@ def postprocess_rockchip(outputs, orig_w, orig_h, model_w, model_h, conf_thresh,
     scale_x = orig_w / float(model_w)
     scale_y = orig_h / float(model_h)
     candidates = []
-    
+
     for branch in range(3):
         box_idx = branch * 3
         score_idx = box_idx + 1
         sum_idx = box_idx + 2
-        
+
         box_tensor = outputs[box_idx][0]       # (64, H, W)
         score_tensor = outputs[score_idx][0]   # (80, H, W)
         sum_tensor = outputs[sum_idx][0][0]    # (H, W)
-        
+
         H, W = box_tensor.shape[1], box_tensor.shape[2]
         if model_h % H != 0 or model_w % W != 0:
             raise ValueError(f"输出网格 {W}x{H} 与模型输入 {model_w}x{model_h} 不整除")
@@ -136,29 +143,36 @@ def postprocess_rockchip(outputs, orig_w, orig_h, model_w, model_h, conf_thresh,
             raise ValueError(f"输出网格 {W}x{H} 推导出非等比 stride: x={stride_x}, y={stride_y}")
         stride = stride_y
         dfl_len = box_tensor.shape[0] // 4 # 16
-        
+
         for row in range(H):
             for col in range(W):
                 # 快速过滤置信度求和分支
                 if sum_tensor[row, col] < conf_thresh:
                     continue
-                    
+
                 # 寻找最大概率的类别
                 best_class = -1
                 best_score = -1.0
-                for class_id in range(80):
+                num_classes = score_tensor.shape[0]
+                for class_id in range(num_classes):
                     score = score_tensor[class_id, row, col]
                     if score > conf_thresh and score > best_score:
                         best_score = score
                         best_class = class_id
-                        
+
                 if best_class < 0:
                     continue
-                    
-                label = CLASSES[best_class]
+
+                if num_classes == 6:
+                    label = TARGET_CLASSES[best_class]
+                    coco_class_id = TARGET_IDS[best_class]
+                else:
+                    label = CLASSES[best_class]
+                    coco_class_id = best_class
+
                 if label not in TARGET_CLASSES:
                     continue
-                    
+
                 # 提取并计算 DFL 距离
                 distances = np.zeros(4)
                 for side in range(4):
@@ -168,40 +182,40 @@ def postprocess_rockchip(outputs, orig_w, orig_h, model_w, model_h, conf_thresh,
                     exp_logits = np.exp(dfl_logits - max_logit)
                     softmax_probs = exp_logits / np.sum(exp_logits)
                     distances[side] = np.sum(softmax_probs * np.arange(dfl_len))
-                    
+
                 # 映射坐标回到原始图
                 x1 = (col + 0.5 - distances[0]) * stride * scale_x
                 y1 = (row + 0.5 - distances[1]) * stride * scale_y
                 x2 = (col + 0.5 + distances[2]) * stride * scale_x
                 y2 = (row + 0.5 + distances[3]) * stride * scale_y
-                
+
                 candidates.append({
-                    "class_id": best_class,
+                    "class_id": coco_class_id,
                     "label": label,
                     "score": float(best_score),
                     "box": [x1, y1, x2, y2]
                 })
-                
+
     return nms(candidates, iou_thresh)
 
 # 4. 加载 COCO 子集标注
 def load_coco_subset_gt(subset_txt_path, anno_path):
     if not os.path.exists(subset_txt_path):
         raise FileNotFoundError(f"Missing subset list at: {subset_txt_path}")
-        
+
     with open(subset_txt_path) as f:
         img_paths = [line.strip() for line in f if line.strip()]
-        
+
     img_names = [os.path.basename(p) for p in img_paths]
     img_ids = [int(name.split('.')[0]) for name in img_names]
     id_to_name = {img_id: name for img_id, name in zip(img_ids, img_names)}
-    
+
     if not os.path.exists(anno_path):
         raise FileNotFoundError(f"Annotations not found at {anno_path}.")
-        
+
     with open(anno_path) as f:
         coco_data = json.load(f)
-        
+
     # 过滤对应的图片宽度高度信息
     images_info = {}
     for img in coco_data['images']:
@@ -211,7 +225,7 @@ def load_coco_subset_gt(subset_txt_path, anno_path):
                 "height": img['height'],
                 "image_id": img['id']
             }
-            
+
     # 过滤 annotations
     gt_by_file = {name: [] for name in img_names}
     for ann in coco_data['annotations']:
@@ -222,7 +236,7 @@ def load_coco_subset_gt(subset_txt_path, anno_path):
             if coco_cat_id in COCO_TO_YOLO_CLASS:
                 yolo_cat_id = COCO_TO_YOLO_CLASS[coco_cat_id]
                 label = CLASSES[yolo_cat_id]
-                
+
                 # 只评测这六个目标类别
                 if label in TARGET_CLASSES:
                     bbox = ann['bbox'] # [x, y, w, h]
@@ -230,13 +244,13 @@ def load_coco_subset_gt(subset_txt_path, anno_path):
                     y1 = bbox[1]
                     x2 = bbox[0] + bbox[2]
                     y2 = bbox[1] + bbox[3]
-                    
+
                     gt_by_file[filename].append({
                         "class_id": yolo_cat_id,
                         "label": label,
                         "box": [x1, y1, x2, y2]
                     })
-                    
+
     return gt_by_file, images_info
 
 # 5. 加载真实桌面场景标注
@@ -252,10 +266,10 @@ def load_desktop_gt():
 def calculate_precision_metrics(gt_dataset, pred_dataset, eval_iou_thresh=0.5):
     all_ap = []
     results = {}
-    
+
     for target_cls in TARGET_CLASSES:
         target_id = CLASSES.index(target_cls)
-        
+
         # 整理该类的所有 GT 框和预测框
         class_gt = []
         for filename, gts in gt_dataset.items():
@@ -266,7 +280,7 @@ def calculate_precision_metrics(gt_dataset, pred_dataset, eval_iou_thresh=0.5):
                         "box": gt['box'],
                         "matched": False
                     })
-                    
+
         class_pred = []
         for filename, preds in pred_dataset.items():
             for pred in preds:
@@ -276,29 +290,29 @@ def calculate_precision_metrics(gt_dataset, pred_dataset, eval_iou_thresh=0.5):
                         "box": pred['box'],
                         "score": pred['score']
                     })
-                    
+
         # 按照 score 从高到低排序
         class_pred = sorted(class_pred, key=lambda x: x['score'], reverse=True)
         num_gts = len(class_gt)
-        
+
         if num_gts == 0:
             results[target_cls] = {"ap": 0.0, "precision": 0.0, "recall": 0.0, "gt_count": 0}
             continue
-            
+
         tp = np.zeros(len(class_pred))
         fp = np.zeros(len(class_pred))
-        
+
         gt_by_img = {}
         for gt in class_gt:
             gt_by_img.setdefault(gt['image_id'], []).append(gt)
-            
+
         for idx, pred in enumerate(class_pred):
             img_id = pred['image_id']
             pbox = pred['box']
-            
+
             best_iou = -1.0
             best_gt = None
-            
+
             if img_id in gt_by_img:
                 for gt in gt_by_img[img_id]:
                     if gt['matched']:
@@ -307,39 +321,39 @@ def calculate_precision_metrics(gt_dataset, pred_dataset, eval_iou_thresh=0.5):
                     if iou_val > best_iou:
                         best_iou = iou_val
                         best_gt = gt
-                        
+
             if best_iou >= eval_iou_thresh:
                 tp[idx] = 1
                 best_gt['matched'] = True
             else:
                 fp[idx] = 1
-                
+
         tp_cumsum = np.cumsum(tp)
         fp_cumsum = np.cumsum(fp)
-        
+
         precisions = tp_cumsum / (tp_cumsum + fp_cumsum + 1e-6)
         recalls = tp_cumsum / num_gts
-        
+
         mrec = np.concatenate(([0.0], recalls, [1.0]))
         mpre = np.concatenate(([1.0], precisions, [0.0]))
-        
+
         for i in range(len(mpre) - 2, -1, -1):
             mpre[i] = max(mpre[i], mpre[i + 1])
-            
+
         i_indices = np.where(mrec[1:] != mrec[:-1])[0]
         ap = np.sum((mrec[i_indices + 1] - mrec[i_indices]) * mpre[i_indices + 1])
         all_ap.append(ap)
-        
+
         final_prec = precisions[-1] if len(precisions) > 0 else 0.0
         final_rec = recalls[-1] if len(recalls) > 0 else 0.0
-        
+
         results[target_cls] = {
             "ap": float(ap),
             "precision": float(final_prec),
             "recall": float(final_rec),
             "gt_count": num_gts
         }
-        
+
     mAP = np.mean(all_ap) if len(all_ap) > 0 else 0.0
     return mAP, results
 
@@ -356,7 +370,7 @@ def evaluate_model(onnx_path, postprocess_fn, gt_dataset, images_info, dataset_t
         quantized_algorithm="normal",
         optimization_level=0
     )
-    
+
     print(f"Loading ONNX: {onnx_path}")
     if is_decoded:
         # 生产双输出模型指定特定输出头
@@ -364,22 +378,22 @@ def evaluate_model(onnx_path, postprocess_fn, gt_dataset, images_info, dataset_t
     else:
         # 官方优化模型直接加载全部
         ret = rknn.load_onnx(model=onnx_path)
-        
+
     if ret != 0:
         raise RuntimeError("Load ONNX failed")
-        
+
     print("Building INT8 RKNN Model on Simulator...")
     ret = rknn.build(do_quantization=True, dataset=dataset_txt)
     if ret != 0:
         raise RuntimeError("RKNN build failed")
-        
+
     ret = rknn.init_runtime()
     if ret != 0:
         raise RuntimeError("RKNN init_runtime failed")
-        
+
     predictions = {}
     print("Running batch evaluation on images...")
-    
+
     for filename in gt_dataset.keys():
         if filename.startswith("det_A_"):
             img_path = os.path.join(desktop_frames_dir, filename)
@@ -388,21 +402,21 @@ def evaluate_model(onnx_path, postprocess_fn, gt_dataset, images_info, dataset_t
             img_path = os.path.join(coco_subset_dir, filename)
             info = images_info[filename]
             orig_w, orig_h = info['width'], info['height']
-            
+
         img = cv2.imread(img_path)
         if img is None:
             print(f"Error: image not found at {img_path}")
             continue
-            
+
         # 预处理与 C++ 对齐
         img_resized = cv2.resize(img, (model_w, model_h))
         img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
-        
+
         outputs = rknn.inference(inputs=[img_rgb])
-        
+
         preds = postprocess_fn(outputs, orig_w, orig_h, model_w, model_h, conf_thresh, iou_thresh)
         predictions[filename] = preds
-        
+
     rknn.release()
     return predictions
 
@@ -410,7 +424,7 @@ def main():
     parser = argparse.ArgumentParser(description="YOLOv8s-RK3588 Accuracy Simulator Evaluation")
     parser.add_argument("--yolo-onnx", type=str, default="/home/rambos/yolov8s.onnx",
                         help="Path to production YOLOv8s ONNX model")
-    parser.add_argument("--official-onnx", type=str, default="/home/rambos/yolov8s_official.onnx",
+    parser.add_argument("--official-onnx", type=str, default="/home/rambos/yolov8_models/onnx/yolov8s_official.onnx",
                         help="Path to official YOLOv8s ONNX model")
     parser.add_argument("--calib-dataset", type=str, default="/home/rambos/calibration/dataset.txt",
                         help="Path to calibration dataset.txt path mapping")
@@ -441,19 +455,19 @@ def main():
     print("====================================================")
     print("  YOLOv8s-RK3588 Quantized Accuracy Evaluation Suite")
     print("====================================================\n")
-    
+
     # (1) 加载验证集
     print(">> Loading datasets...")
     coco_gt, coco_images_info = load_coco_subset_gt(args.coco_subset_txt, args.coco_anno_json)
     desktop_gt = load_desktop_gt()
-    
+
     combined_gt = {}
     combined_gt.update(coco_gt)
     combined_gt.update(desktop_gt)
-    
+
     print(f"Loaded {len(coco_gt)} COCO subset images and {len(desktop_gt)} desktop scenario frames.")
     print(f"Total evaluation size: {len(combined_gt)} frames.\n")
-    
+
     decoded_preds = None
     rockchip_preds = None
 
@@ -476,7 +490,7 @@ def main():
         )
         t1 = time.time()
         print(f"Production [decoded] Model evaluation completed in {t1 - t0:.1f} seconds.\n")
-    
+
     if args.model_mode in ("both", "rockchip_dfl"):
         print(">> Evaluating Optimized [rockchip_dfl] Model...")
         t0 = time.time()
@@ -496,10 +510,10 @@ def main():
         )
         t1 = time.time()
         print(f"Optimized [rockchip_dfl] Model evaluation completed in {t1 - t0:.1f} seconds.\n")
-    
+
     # (4) 计算精度指标并输出报表
     print(f">> Calculating Accuracy metrics (IoU threshold = {args.eval_iou_threshold:.2f})...")
-    
+
     reports = []
     if decoded_preds is not None:
         coco_map, coco_res = calculate_precision_metrics(coco_gt, {k: decoded_preds[k] for k in coco_gt.keys()}, args.eval_iou_threshold)

@@ -30,12 +30,12 @@ def parse_args():
     )
     parser.add_argument(
         "--weights",
-        default="/home/rambos/yolov8s.pt",
+        default="/home/rambos/yolov8_models/pytorch/yolov8s.pt",
         help="source YOLOv8s .pt weights",
     )
     parser.add_argument(
         "--output-dir",
-        default="/home/rambos",
+        default="/home/rambos/yolov8_models/onnx",
         help="directory for exported ONNX files",
     )
     parser.add_argument(

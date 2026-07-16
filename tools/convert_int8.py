@@ -11,7 +11,7 @@
         --calib-dir ~/calibration_640x480 \
         --dataset-txt ~/calibration_640x480/dataset.txt \
         --output-layout rockchip_dfl \
-        --output ~/yolov8s_rockchip_dfl_640x480.rknn
+        --output ~/yolov8_models/rknn/yolov8s_rockchip_dfl_640x480.rknn
 """
 import argparse
 import os
@@ -19,7 +19,7 @@ import glob
 from rknn.api import RKNN
 
 ONNX_MODEL    = os.path.expanduser("~/yolov8s.onnx")
-RKNN_MODEL    = os.path.expanduser("~/yolov8s_int8.rknn")
+RKNN_MODEL    = os.path.expanduser("~/yolov8_models/rknn/yolov8s_int8.rknn")
 CALIB_DIR     = os.path.expanduser("~/calibration")
 PLATFORM      = "rk3588"
 MEAN_VALUES   = [[0, 0, 0]]        # YOLOv8 预处理：/255，均值=0

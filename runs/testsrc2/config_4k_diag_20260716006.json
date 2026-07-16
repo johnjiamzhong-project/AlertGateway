@@ -1,0 +1,9 @@
+{
+  "active_config": "config_4k_ema_strict_20260716.json",
+  "detection": {
+    "target_classes": ["cell phone", "cup", "keyboard", "mouse", "laptop", "book", "chair", "bed"]
+  },
+  "stream": {
+    "diagnostics_enabled": true
+  }
+}

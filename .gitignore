@@ -28,5 +28,13 @@ model/*.onnx
 __pycache__/
 *.pyc
 
+# generated test/training artifacts (keep local, do not add to Git)
+runs/**/*.log
+runs/**/*.mp4
+runs/**/*.flv
+runs/detect/
+runs/input_videos/
+runs/testsrc2/quality_compare_*/
+
 # IDE/Codex settings
 .codex/

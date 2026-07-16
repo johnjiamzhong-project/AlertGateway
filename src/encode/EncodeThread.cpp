@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstring>
 #include <vector>
+#include <deque>
 #include <chrono>
 #include "mpp_meta.h"
 #include "im2d.h"
@@ -109,7 +110,8 @@ bool EncodeThread::init_mpp() {
 
     cfg_ok = set_s32("codec:type",        MPP_VIDEO_CodingAVC) && cfg_ok;
     cfg_ok = set_s32("h264:profile",      77) && cfg_ok;  // Main profile — wide player support
-    cfg_ok = set_s32("h264:level",        31) && cfg_ok;  // Level 3.1 — fits 640×480@30fps
+    // 保持既有 MPP level 值；实际可用分辨率/帧率由板端 MPP 驱动和输入配置共同决定。
+    cfg_ok = set_s32("h264:level",        31) && cfg_ok;
     // CBR：恒定码率，给RTMP直播推流用，带宽要稳定；不像录像场景能用VBR换更好画质
     cfg_ok = set_s32("rc:mode",           MPP_ENC_RC_MODE_CBR) && cfg_ok;
     cfg_ok = set_s32("rc:bps_target",     cfg_.bitrate_kbps * 1000) && cfg_ok;
@@ -120,7 +122,7 @@ bool EncodeThread::init_mpp() {
     cfg_ok = set_s32("rc:fps_out_num",    cfg_.fps) && cfg_ok;
     cfg_ok = set_s32("rc:fps_out_denorm", 1) && cfg_ok;
     // GOP小(关键帧密)抗丢包、方便随机访问但码率开销大；这里是基于低帧率+实时性优先的选择
-    cfg_ok = set_s32("rc:gop",            8) && cfg_ok;  // keyframe every ~550ms at 14.6fps
+    cfg_ok = set_s32("rc:gop",            8) && cfg_ok;  // 关键帧间隔为 8 个输出帧
     if (!cfg_ok) {
         mpp_enc_cfg_deinit(enc_cfg);
         deinit_mpp();
@@ -459,11 +461,16 @@ void EncodeThread::run() {
     uint64_t out_dropped = 0;
     uint64_t put_failures = 0;
     uint64_t processing_us = 0;
+    std::deque<Frame> alignment_frames;
     auto stats_t = std::chrono::steady_clock::now();
 
     while (running_) {
         Frame frame;
         if (!in_queue_.pop(frame, 200)) continue;
+        alignment_frames.push_back(std::move(frame));
+        if (alignment_frames.size() <= static_cast<size_t>(std::max(0, cfg_.detection_alignment_delay_frames))) continue;
+        frame = std::move(alignment_frames.front());
+        alignment_frames.pop_front();
         if (frame.raw_data.empty()) continue;
         const auto frame_t = std::chrono::steady_clock::now();
         ++input_frames;
@@ -498,13 +505,15 @@ void EncodeThread::run() {
             }
         }
 
-        // 直接在 DRM buffer 上叠最新一次的检测框
-        auto dets = shared_dets_.get();
-        for (const auto& det : dets) {
+
+        // 当前帧先完整写入 DRM buffer，再叠加与其 PTS 对齐的检测结果。
+        const auto display = shared_dets_.get_for_pts(frame.pts_ms);
+        const int detection_box_thickness = (w >= 3840 && h >= 2160) ? 6 : 2;
+        for (const auto& det : display.detections) {
             draw_rect_nv12(drm_ptr, w, h,
                            static_cast<int>(det.x1), static_cast<int>(det.y1),
                            static_cast<int>(det.x2), static_cast<int>(det.y2),
-                           2, BOX_Y, BOX_U, BOX_V);
+                           detection_box_thickness, BOX_Y, BOX_U, BOX_V);
 
             if (cfg_.draw_detection_labels) {
                 int confidence_pct = static_cast<int>(det.score * 100.0f);
@@ -597,6 +606,10 @@ void EncodeThread::run() {
                       << " put_fail=" << put_failures
                       << " out_drop=" << out_dropped
                       << " queue=" << out_queue_.size()
+                      << " frame_id=" << frame.frame_id
+                      << " det_frame_id=" << display.detection_frame_id
+                      << " pts_delta_ms=" << display.pts_delta_ms
+                      << " active_tracks=" << display.active_tracks
                       << "\n" << std::flush;
             input_frames = encoded_packets = encoded_bytes = out_dropped = put_failures = 0;
             processing_us = 0;

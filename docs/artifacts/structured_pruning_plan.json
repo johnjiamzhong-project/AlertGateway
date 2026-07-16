@@ -1,0 +1,17 @@
+{
+  "baseline": "yolov8s_desktop6_final_30e_20260710",
+  "prune_ratio": 0.1,
+  "candidate_layers": [
+    "model.4.cv1",
+    "model.4.m.0.cv2",
+    "model.4.m.1.cv1",
+    "model.15.cv1",
+    "model.15.cv2"
+  ],
+  "constraints": [
+    "preserve C2f split/concat channel compatibility",
+    "preserve Detect input channels",
+    "prune channels in multiples of 16",
+    "retrain before export"
+  ]
+}

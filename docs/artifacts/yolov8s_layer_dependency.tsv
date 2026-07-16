@@ -1,0 +1,24 @@
+index	from	type	params
+0	-1	Conv	928
+1	-1	Conv	18560
+2	-1	C2f	29056
+3	-1	Conv	73984
+4	-1	C2f	197632
+5	-1	Conv	295424
+6	-1	C2f	788480
+7	-1	Conv	1180672
+8	-1	C2f	1838080
+9	-1	SPPF	656896
+10	-1	Upsample	0
+11	[-1, 6]	Concat	0
+12	-1	C2f	591360
+13	-1	Upsample	0
+14	[-1, 4]	Concat	0
+15	-1	C2f	148224
+16	-1	Conv	147712
+17	[-1, 12]	Concat	0
+18	-1	C2f	493056
+19	-1	Conv	590336
+20	[-1, 9]	Concat	0
+21	-1	C2f	1969152
+22	[15, 18, 21]	Detect	2118370

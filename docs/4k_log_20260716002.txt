@@ -1,0 +1,60 @@
+4K 严格 IoU 关联候选补充诊断（仅统计，无算法改动）
+
+输入：runs/input_videos/4k/VID_20260712_131410.mp4（循环发布至 live/testsrc2）
+板端：192.168.0.201；诊断二进制 AlertGateway.diag_20260716002
+有效窗口：PTS 8359846 ～ 8389840 ms（首个连续 30 秒窗口）
+说明：换用本视频后，窗口内完整推理帧为 650，故不是上一轮报告中的 679 帧。
+本次保持 IoU 阈值、EMA、TTL 和全部轨迹逻辑不变；只在 debug 日志中增加候选统计。
+
+1. 完整推理帧的检测数分布（N=650）
+   detections=0：71 帧
+   detections=1：138 帧
+   detections>=2：441 帧
+
+2. “检测结果总数”的含义
+   本窗口检测结果总数为 1677，含义是所有完整推理帧的检测框总数
+   （sum(detections)），不是存在检测结果的帧数。
+
+3. matched=0 但仍有检测框的 best candidate
+   统计规则：仅看关联开始前、同类别的 Active/Shadow Track；best candidate 按 IoU
+   最大选择，IoU 相同则归一化中心距离更小者优先。归一化中心距离 = 两框中心欧氏距离 /
+   max(Track 对角线, Detection 对角线, 1px)。trackId=0 / state=None 表示当时不存在
+   同类别 Active/Shadow Track，因而没有可被 IoU 规则拒绝的候选。
+
+   frameId | PTS(ms) | detIndex | classId | bestIoU | normCenterDist | trackId | state
+   1       | 8359846 | 0        | 73      | N/A     | N/A            | 0       | None
+   1       | 8359846 | 1        | 64      | N/A     | N/A            | 0       | None
+   1       | 8359846 | 2        | 73      | N/A     | N/A            | 0       | None
+   1       | 8359846 | 3        | 41      | N/A     | N/A            | 0       | None
+   104     | 8363071 | 0        | 63      | 0.397381| 0.087904       | 31      | Active
+   104     | 8363071 | 1        | 73      | 0.281225| 0.128815       | 1       | Active
+   107     | 8363162 | 0        | 63      | 0.419004| 0.079858       | 35      | Active
+   115     | 8363434 | 0        | 63      | 0.000000| 1.149540       | 35      | Shadow
+   118     | 8363552 | 0        | 63      | N/A     | N/A            | 0       | None
+   121     | 8363632 | 0        | 63      | N/A     | N/A            | 0       | None
+   128     | 8363839 | 0        | 63      | N/A     | N/A            | 0       | None
+   154     | 8364540 | 0        | 63      | N/A     | N/A            | 0       | None
+   178     | 8365301 | 0        | 73      | N/A     | N/A            | 0       | None
+   185     | 8365506 | 0        | 73      | N/A     | N/A            | 0       | None
+   196     | 8365837 | 0        | 73      | N/A     | N/A            | 0       | None
+   198     | 8365883 | 0        | 63      | N/A     | N/A            | 0       | None
+   204     | 8366069 | 0        | 63      | N/A     | N/A            | 0       | None
+   209     | 8366240 | 0        | 63      | N/A     | N/A            | 0       | None
+   213     | 8366376 | 0        | 67      | N/A     | N/A            | 0       | None
+   217     | 8366520 | 0        | 66      | N/A     | N/A            | 0       | None
+   525     | 8376265 | 0        | 63      | 0.416219| 0.128704       | 48      | Active
+   541     | 8376913 | 0        | 64      | N/A     | N/A            | 0       | None
+   590     | 8378839 | 0        | 66      | N/A     | N/A            | 0       | None
+
+4. 被拒绝候选的 best IoU 分布
+   有同类别 Active/Shadow Track 的候选框：5 个
+   <0.1：1
+   0.1～0.25：0
+   0.25～0.5：4
+   >0.5 但因其他条件被拒绝：0
+   无同类别 Active/Shadow Track：18 个检测框（不属于 IoU 候选，单列避免混入 <0.1）。
+
+5. matched=0 原因拆分（N=90 帧）
+   detections=0：71 帧
+   有检测框但关联失败：19 帧
+

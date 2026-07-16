@@ -1,0 +1,51 @@
+{
+  "source": {
+    "type": "v4l2",
+    "device": "/dev/video20",
+    "width": 1280,
+    "height": 720,
+    "fps": 15
+  },
+  "image_processing": {
+    "thumbnail": {
+      "enabled": false,
+      "width": 320,
+      "height": 180,
+      "on_detection_only": true
+    },
+    "roi": {
+      "enabled": false,
+      "regions": [],
+      "filter_outside": true,
+      "track_dwell_sec": 0
+    },
+    "tiling": {
+      "enabled": false,
+      "grid_cols": 2,
+      "grid_rows": 1,
+      "overlap_ratio": 0.1,
+      "merge_iou_threshold": 0.45
+    }
+  },
+  "model": {
+    "path": "model/yolov8s_rockchip_dfl.rknn",
+    "output_layout": "rockchip_dfl",
+    "conf_threshold": 0.25,
+    "iou_threshold": 0.45
+  },
+  "detection": {
+    "target_classes": ["cell phone", "cup", "keyboard", "mouse", "laptop", "book"],
+    "report_interval_sec": 1
+  },
+  "stream": {
+    "rtmp_url": "rtmp://192.168.0.168/live/v4l2_720p_result",
+    "bitrate_kbps": 3000,
+    "draw_detection_labels": true
+  },
+  "mqtt": {
+    "broker": "192.168.0.168",
+    "port": 1883,
+    "topic": "desk/detect",
+    "client_id": "AlertGateway-V4L2-720p"
+  }
+}

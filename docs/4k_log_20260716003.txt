@@ -1,0 +1,45 @@
+4K 空检测连续段与跨类别候选诊断（仅统计，无算法改动）
+
+输入：runs/input_videos/4k/VID_20260712_131410.mp4（循环发布至 live/testsrc2）
+有效窗口：PTS 9089225 ～ 9119210 ms（首个连续 30 秒窗口，655 个完整推理帧）
+保持 IoU 阈值、EMA、TTL 和轨迹逻辑不变；本文件仅输出本次要求的两项诊断。
+
+1. detections=0 的连续长度分布
+
+   单个空帧：2 段
+   连续 2 帧：3 段
+   连续 3 帧：2 段
+   连续 4 帧以上：6 段
+
+   最长连续空检测：16 个完整推理帧，frameId 279 ～ 303。
+   空检测从 PTS 9098076 ms 开始，下一次非空检测为 PTS 9098826 ms，持续 750 ms。
+
+2. 无同类别 Track 时的跨类别最佳重叠 Track
+
+   说明：本次重跑窗口中该类检测框为 17 个（上一轮为 18 个）。只在同类别
+   Active/Shadow Track 不存在时，对所有类别的 Active/Shadow Track 选 IoU 最大者；
+   IoU 相同时选归一化中心距离更小者。归一化中心距离 = 两框中心欧氏距离 /
+   max(Track 对角线, Detection 对角线, 1px)。
+
+   “可能同一位置上的类别跳变”仅为诊断标记：IoU >= 0.25 且归一化中心距离 <= 0.25；
+   不参与任何关联、平滑、TTL 或 Track 状态逻辑。
+
+   frameId | PTS(ms) | detClassId | trackId | trackClassId | IoU      | normCenterDist | 可能类别跳变
+   1       | 9089225 | 73         | 0       | N/A          | N/A      | N/A            | 否（无 Active/Shadow Track）
+   1       | 9089225 | 64         | 0       | N/A          | N/A      | N/A            | 否（无 Active/Shadow Track）
+   1       | 9089225 | 73         | 0       | N/A          | N/A      | N/A            | 否（无 Active/Shadow Track）
+   1       | 9089225 | 41         | 0       | N/A          | N/A      | N/A            | 否（无 Active/Shadow Track）
+   1       | 9089225 | 66         | 0       | N/A          | N/A      | N/A            | 否（无 Active/Shadow Track）
+   268     | 9097746 | 63         | 0       | N/A          | N/A      | N/A            | 否（无 Active/Shadow Track）
+   271     | 9097837 | 63         | 0       | N/A          | N/A      | N/A            | 否（无 Active/Shadow Track）
+   278     | 9098054 | 63         | 0       | N/A          | N/A      | N/A            | 否（无 Active/Shadow Track）
+   304     | 9098826 | 63         | 0       | N/A          | N/A      | N/A            | 否（无 Active/Shadow Track）
+   328     | 9099694 | 73         | 0       | N/A          | N/A      | N/A            | 否（无 Active/Shadow Track）
+   348     | 9100289 | 63         | 50      | 73           | 0.973961 | 0.005667       | 是
+   354     | 9100475 | 63         | 50      | 73           | 0.879761 | 0.028261       | 是
+   358     | 9100628 | 63         | 0       | N/A          | N/A      | N/A            | 否（无 Active/Shadow Track）
+   363     | 9100800 | 67         | 53      | 63           | 0.940287 | 0.012065       | 是
+   367     | 9100941 | 66         | 54      | 67           | 0.664460 | 0.063207       | 是
+   691     | 9111272 | 64         | 0       | N/A          | N/A      | N/A            | 否（无 Active/Shadow Track）
+   740     | 9113248 | 66         | 111     | 73           | 0.902906 | 0.028717       | 是
+

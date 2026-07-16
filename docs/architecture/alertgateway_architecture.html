@@ -1,0 +1,49 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AlertGateway Architecture</title><style>body{margin:0;background:#f3f4f6;font-family:Arial,sans-serif}.wrap{max-width:1240px;margin:24px auto;background:#fff;padding:20px;box-shadow:0 4px 20px #0001;border-radius:12px}svg{width:100%;height:auto;display:block}</style></head><body><main class="wrap"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" width="1200" height="760">
+<style>text{font-family:Arial,sans-serif;fill:#111827}.title{font-size:24px;font-weight:700}.layer{font-size:12px;font-weight:700;letter-spacing:1px}.node{font-size:15px;font-weight:600}.sub{font-size:12px;fill:#6b7280}.label{font-size:12px;font-weight:600}</style>
+<defs><marker id="b" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#2563eb"/></marker><marker id="g" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#16a34a"/></marker><marker id="p" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#9333ea"/></marker></defs>
+<rect width="1200" height="760" fill="#fff"/><text x="40" y="42" class="title">AlertGateway 4K Video Inference Architecture</text><text x="40" y="66" class="sub">Stage 1 + Stage 2: source switching, SRS relay, RK3588 inference, image processing, MQTT and playback</text>
+<rect x="30" y="90" width="1140" height="125" rx="10" fill="#eff6ff" stroke="#bfdbfe" stroke-dasharray="6,4"/><text x="48" y="112" class="layer">INPUT / PUBLISH</text>
+<rect x="30" y="235" width="1140" height="115" rx="10" fill="#f0fdfa" stroke="#99f6e4" stroke-dasharray="6,4"/><text x="48" y="257" class="layer">SRS RELAY</text>
+<rect x="30" y="370" width="1140" height="220" rx="10" fill="#faf5ff" stroke="#ddd6fe" stroke-dasharray="6,4"/><text x="48" y="392" class="layer">RK3588 BOARD</text>
+<rect x="30" y="610" width="1140" height="115" rx="10" fill="#f0fdf4" stroke="#bbf7d0" stroke-dasharray="6,4"/><text x="48" y="632" class="layer">OUTPUT / OBSERVABILITY</text>
+<rect x="65" y="130" width="190" height="62" rx="8" fill="#fff" stroke="#93c5fd" stroke-width="1.5"/><text x="160.0" y="158" text-anchor="middle" class="node">4K MP4 / Camera</text><text x="160.0" y="181" text-anchor="middle" class="sub">3840x2160 / V4L2</text>
+<rect x="310" y="130" width="215" height="62" rx="8" fill="#fff" stroke="#93c5fd" stroke-width="1.5"/><text x="417.5" y="158" text-anchor="middle" class="node">WSL Publisher</text><text x="417.5" y="181" text-anchor="middle" class="sub">ffmpeg -re -> RTMP</text>
+<rect x="635" y="130" width="220" height="62" rx="8" fill="#fff" stroke="#93c5fd" stroke-width="1.5"/><text x="745.0" y="158" text-anchor="middle" class="node">V4L2 Local Source</text><text x="745.0" y="181" text-anchor="middle" class="sub">YUYV / 720p ~10 FPS</text>
+<rect x="930" y="130" width="190" height="62" rx="8" fill="#fff" stroke="#93c5fd" stroke-width="1.5"/><text x="1025.0" y="158" text-anchor="middle" class="node">Test Config</text><text x="1025.0" y="181" text-anchor="middle" class="sub">source + tasks</text>
+<rect x="390" y="275" width="420" height="62" rx="8" fill="#fff" stroke="#5eead4" stroke-width="1.5"/><text x="600.0" y="303" text-anchor="middle" class="node">SRS 5.0.205</text><text x="600.0" y="326" text-anchor="middle" class="sub">RTMP 1935 / API 1985</text>
+<rect x="70" y="420" width="190" height="62" rx="8" fill="#fff" stroke="#c4b5fd" stroke-width="1.5"/><text x="165.0" y="448" text-anchor="middle" class="node">PullStreamThread</text><text x="165.0" y="471" text-anchor="middle" class="sub">FFmpeg decode / reconnect</text>
+<rect x="300" y="420" width="190" height="62" rx="8" fill="#fff" stroke="#c4b5fd" stroke-width="1.5"/><text x="395.0" y="448" text-anchor="middle" class="node">Format Check</text><text x="395.0" y="471" text-anchor="middle" class="sub">resolution / NV12</text>
+<rect x="530" y="420" width="250" height="62" rx="8" fill="#fff" stroke="#c4b5fd" stroke-width="1.5"/><text x="655.0" y="448" text-anchor="middle" class="node">InferThread + RKNN</text><text x="655.0" y="471" text-anchor="middle" class="sub">YOLOv8s INT8 / NPU</text>
+<rect x="820" y="420" width="290" height="62" rx="8" fill="#fff" stroke="#c4b5fd" stroke-width="1.5"/><text x="965.0" y="448" text-anchor="middle" class="node">Image Processing</text><text x="965.0" y="471" text-anchor="middle" class="sub">Thumbnail / ROI / Tiling</text>
+<rect x="180" y="505" width="210" height="62" rx="8" fill="#fff" stroke="#c4b5fd" stroke-width="1.5"/><text x="285.0" y="533" text-anchor="middle" class="node">MPP H.264</text><text x="285.0" y="556" text-anchor="middle" class="sub">output video</text>
+<rect x="500" y="505" width="210" height="62" rx="8" fill="#fff" stroke="#c4b5fd" stroke-width="1.5"/><text x="605.0" y="533" text-anchor="middle" class="node">MQTT Publisher</text><text x="605.0" y="556" text-anchor="middle" class="sub">detections / thumbnail</text>
+<rect x="785" y="505" width="250" height="62" rx="8" fill="#fff" stroke="#c4b5fd" stroke-width="1.5"/><text x="910.0" y="533" text-anchor="middle" class="node">Lifecycle Control</text><text x="910.0" y="556" text-anchor="middle" class="sub">timeout / SIGINT / clean exit</text>
+<rect x="150" y="655" width="250" height="45" rx="8" fill="#fff" stroke="#86efac" stroke-width="1.5"/><text x="275.0" y="683" text-anchor="middle" class="node">SRS Output</text><text x="275.0" y="706" text-anchor="middle" class="sub">live/testsrc2_result</text>
+<rect x="470" y="655" width="250" height="45" rx="8" fill="#fff" stroke="#86efac" stroke-width="1.5"/><text x="595.0" y="683" text-anchor="middle" class="node">rambosplayer</text><text x="595.0" y="706" text-anchor="middle" class="sub">4K visual check</text>
+<rect x="790" y="655" width="250" height="45" rx="8" fill="#fff" stroke="#86efac" stroke-width="1.5"/><text x="915.0" y="683" text-anchor="middle" class="node">MQTTX / Consumer</text><text x="915.0" y="706" text-anchor="middle" class="sub">desk/* topic</text>
+<path d="M255 161 H310" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#b)"/>
+<rect x="265" y="136" width="59" height="20" rx="3" fill="#fff" opacity=".95"/><text x="270" y="150" class="label" fill="#2563eb">4K file</text>
+<path d="M525 161 H635" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#b)"/>
+<rect x="545" y="136" width="38" height="20" rx="3" fill="#fff" opacity=".95"/><text x="550" y="150" class="label" fill="#2563eb">RTMP</text>
+<path d="M525 306 H70 V420" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#b)"/>
+<rect x="280" y="281" width="38" height="20" rx="3" fill="#fff" opacity=".95"/><text x="285" y="295" class="label" fill="#2563eb">pull</text>
+<path d="M810 306 H1120 V420 H1110" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#b)"/>
+<rect x="895" y="281" width="87" height="20" rx="3" fill="#fff" opacity=".95"/><text x="900" y="295" class="label" fill="#2563eb">pull_stream</text>
+<path d="M260 451 H300" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#b)"/>
+<path d="M490 451 H530" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#b)"/>
+<rect x="490" y="426" width="38" height="20" rx="3" fill="#fff" opacity=".95"/><text x="495" y="440" class="label" fill="#2563eb">NV12</text>
+<path d="M780 451 H820" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#b)"/>
+<rect x="785" y="426" width="80" height="20" rx="3" fill="#fff" opacity=".95"/><text x="790" y="440" class="label" fill="#2563eb">detections</text>
+<path d="M650 482 V505 H390" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#b)"/>
+<rect x="585" y="481" width="59" height="20" rx="3" fill="#fff" opacity=".95"/><text x="590" y="495" class="label" fill="#2563eb">overlay</text>
+<path d="M945 482 V505 H710" fill="none" stroke="#16a34a" stroke-width="2" marker-end="url(#g)"/>
+<rect x="845" y="481" width="94" height="20" rx="3" fill="#fff" opacity=".95"/><text x="850" y="495" class="label" fill="#16a34a">MQTT payload</text>
+<path d="M285 567 V632 H275 V655" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#b)"/>
+<rect x="255" y="606" width="45" height="20" rx="3" fill="#fff" opacity=".95"/><text x="260" y="620" class="label" fill="#2563eb">H.264</text>
+<path d="M605 567 V655" fill="none" stroke="#16a34a" stroke-width="2" marker-end="url(#g)"/>
+<rect x="610" y="606" width="52" height="20" rx="3" fill="#fff" opacity=".95"/><text x="615" y="620" class="label" fill="#16a34a">events</text>
+<path d="M400 677 H470" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#b)"/>
+<path d="M720 677 H790" fill="none" stroke="#16a34a" stroke-width="2" marker-end="url(#g)"/>
+<path d="M165 420 C110 380 100 350 390 306" fill="none" stroke="#9333ea" stroke-width="2" marker-end="url(#p)" stroke-dasharray="6,4"/>
+<rect x="160" y="351" width="73" height="20" rx="3" fill="#fff" opacity=".95"/><text x="165" y="365" class="label" fill="#9333ea">reconnect</text>
+<g transform="translate(55,742)"><line x1="0" y1="0" x2="28" y2="0" stroke="#2563eb" stroke-width="2" marker-end="url(#b)"/><text x="36" y="4" class="sub">video data</text><line x1="150" y1="0" x2="178" y2="0" stroke="#16a34a" stroke-width="2" marker-end="url(#g)"/><text x="186" y="4" class="sub">MQTT async result</text><line x1="370" y1="0" x2="398" y2="0" stroke="#9333ea" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#p)"/><text x="406" y="4" class="sub">control / reconnect</text></g></svg></main></body></html>

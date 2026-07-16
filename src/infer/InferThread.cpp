@@ -548,7 +548,20 @@ void InferThread::run() {
                 pending_thumbnail = thumbnail_task.create(frame);
                 has_thumbnail = true;
             }
-            shared_dets_.set(last_detections);
+            shared_dets_.update(last_detections, frame.frame_id, frame.pts_ms,
+                                frame.width, frame.height);
+            if (cfg_.track_debug_logging && frame_idx % 30 == 0) {
+                size_t matched = 0, created = 0, lost = 0;
+                shared_dets_.get_debug_stats(matched, created, lost);
+                const uint64_t reversal_damped = shared_dets_.get_reversal_damped_total();
+                std::cout << "[TrackStats] infer_frame=" << frame.frame_id
+                          << " infer_pts_ms=" << frame.pts_ms
+                          << " infer_queue=" << in_queue_.size()
+                          << " matched=" << matched << " created=" << created
+                          << " lost=" << lost
+                          << " reversal_damped_total=" << reversal_damped
+                          << "\n" << std::flush;
+            }
         }
         frame_idx++;
 

@@ -27,7 +27,9 @@ struct Frame {
     std::vector<uint8_t> rgb_data;      // 转换后的 RGB24 数据（原始分辨率，暂未使用）
     int     width        = 0;
     int     height       = 0;
-    int64_t timestamp_ms = 0;           // 采集时间戳（ms），用于调试和未来 PTS 校准
+    uint64_t frame_id    = 0;           // 源帧单调序号，同一画面送入编码/推理队列时保持一致
+    int64_t pts_ms       = 0;           // 同一单调时钟基准的显示时间戳（ms），用于框与视频对齐
+    int64_t timestamp_ms = 0;           // 兼容现有 ROI/MQTT 的采集时间戳（ms），等同 pts_ms
     std::vector<Detection> detections;  // 本帧的推理结果，由 InferThread 写入
     PixelFormat pixel_format = PixelFormat::YUYV; // 像素格式，默认 YUYV
 };

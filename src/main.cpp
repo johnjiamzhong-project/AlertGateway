@@ -131,8 +131,42 @@ int main(int argc, char* argv[]) {
         cfg["model"]["iou_threshold"].get<float>(),
         cfg["detection"]["target_classes"].get<std::vector<std::string>>(),
         cfg["model"].value("infer_every_n_frames", 1),
-        cfg["model"].value("output_layout", std::string("decoded"))
+        cfg["model"].value("output_layout", std::string("decoded")),
+        cfg["model"].value("track_confirm_hits", 2),
+        cfg["model"].value("track_ttl_ms", 300),
+        cfg["model"].value("track_match_iou", 0.20f),
+        cfg["model"].value("track_center_distance_ratio", 0.12f),
+        cfg["model"].value("track_display_mode", 1),
+        cfg["model"].value("track_ema_alpha", 0.25f),
+        cfg["model"].value("track_deadzone_center_px", 6.0f),
+        cfg["model"].value("track_deadzone_size_ratio", 0.01f),
+        cfg["model"].value("track_innovation_iou", 0.45f),
+        cfg["model"].value("track_max_correction_px", 120.0f),
+        cfg["model"].value("track_jump_confirm_hits", 2),
+        cfg["model"].value("track_align_to_video_pts", true),
+        cfg["model"].value("track_adaptive_filter", true),
+        cfg["model"].value("track_center_alpha_min", 0.18f),
+        cfg["model"].value("track_center_alpha_max", 0.90f),
+        cfg["model"].value("track_size_alpha_min", 0.12f),
+        cfg["model"].value("track_size_alpha_max", 0.45f),
+        cfg["model"].value("track_motion_full_response_ratio", 1.20f),
+        cfg["model"].value("track_motion_smoothing_alpha", 0.35f),
+        cfg["model"].value("track_display_hold_ms", 100),
+        cfg["model"].value("track_debug_logging", false),
+        cfg["model"].value("track_reversal_damping_enabled", false),
+        cfg["model"].value("track_reversal_center_alpha_max", 0.35f),
+        cfg["model"].value("track_reversal_min_motion_ratio", 0.005f)
     };
+    if (model_cfg.track_display_mode < 0 || model_cfg.track_display_mode > 1) {
+        std::cerr << "Config error: model.track_display_mode must be 0 (raw) or 1 (adaptive)\n";
+        return 1;
+    }
+    if (model_cfg.track_reversal_center_alpha_max < 0.0f ||
+        model_cfg.track_reversal_center_alpha_max > 1.0f ||
+        model_cfg.track_reversal_min_motion_ratio < 0.0f) {
+        std::cerr << "Config error: invalid model.track_reversal_* value\n";
+        return 1;
+    }
 
     // 检测上报配置：MQTT 上报周期（秒），结果有变化时才上报
     DetectionConfig det_cfg{
@@ -175,7 +209,8 @@ int main(int argc, char* argv[]) {
         src_h,
         src_fps,
         cfg["stream"].value("bitrate_kbps", 2000),
-        cfg["stream"].value("draw_detection_labels", true)
+        cfg["stream"].value("draw_detection_labels", true),
+        cfg["stream"].value("detection_alignment_delay_frames", 2)
     };
 
     // 推流配置：RTMP 地址 + 分辨率/帧率（用于 FFmpeg AVStream 参数）
@@ -202,12 +237,29 @@ int main(int argc, char* argv[]) {
     // EncodeThread 每帧从 SharedDetections 读最新检测结果叠框，与推理速度解耦。
     // InferThread 会丢弃 infer_queue 中的旧帧，始终处理最新帧。
     //
-    SharedDetections shared_dets; // 推理结果共享区，InferThread 写、EncodeThread 读
+    SharedDetections shared_dets({model_cfg.track_display_mode, model_cfg.track_confirm_hits,
+                                  model_cfg.track_ttl_ms, model_cfg.track_match_iou,
+                                  model_cfg.track_center_distance_ratio, model_cfg.track_ema_alpha,
+                                  model_cfg.track_deadzone_center_px, model_cfg.track_deadzone_size_ratio,
+                                  model_cfg.track_innovation_iou, model_cfg.track_max_correction_px,
+                                  model_cfg.track_jump_confirm_hits, model_cfg.track_align_to_video_pts,
+                                  model_cfg.track_adaptive_filter,
+                                  model_cfg.track_center_alpha_min,
+                                  model_cfg.track_center_alpha_max,
+                                  model_cfg.track_size_alpha_min,
+                                  model_cfg.track_size_alpha_max,
+                                  model_cfg.track_motion_full_response_ratio,
+                                  model_cfg.track_motion_smoothing_alpha,
+                                  model_cfg.track_display_hold_ms,
+                                  model_cfg.track_debug_logging,
+                                  model_cfg.track_reversal_damping_enabled,
+                                  model_cfg.track_reversal_center_alpha_max,
+                                  model_cfg.track_reversal_min_motion_ratio});
 
     // enc_queue 容量=1：约 68ms 缓冲，背压控制采集速度
     BlockingQueue<Frame>         enc_queue(1);
-    // infer_queue 容量=2：CaptureThread 非阻塞投递，InferThread 忙时直接丢帧
-    BlockingQueue<Frame>         infer_queue(2);
+    // infer_queue 单槽且采用 push_latest：推理繁忙时用最新帧覆盖旧帧，绝不积压。
+    BlockingQueue<Frame>         infer_queue(1);
     // stream_queue 容量=2：约 137ms 缓冲，平滑编码抖动
     BlockingQueue<EncodedPacket> stream_queue(2);
     // mqtt_queue 容量=16：检测摘要异步上报，避免 MQTT 网络延迟阻塞推理

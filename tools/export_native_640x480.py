@@ -15,12 +15,12 @@ def parse_args():
     )
     parser.add_argument(
         "--weights",
-        default="/home/rambos/yolov8s.pt",
+        default="/home/rambos/yolov8_models/pytorch/yolov8s.pt",
         help="source YOLOv8s .pt weights",
     )
     parser.add_argument(
         "--output",
-        default="/home/rambos/yolov8s_official_native_640x480.onnx",
+        default="/home/rambos/yolov8_models/onnx/yolov8s_official_native_640x480.onnx",
         help="destination ONNX path",
     )
     parser.add_argument("--width", type=int, default=640, help="model input width")

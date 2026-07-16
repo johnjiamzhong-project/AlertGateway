@@ -4,9 +4,10 @@ set(CMAKE_SYSTEM_PROCESSOR aarch64)
 set(CMAKE_C_COMPILER   aarch64-linux-gnu-gcc)
 set(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++)
 
-# Board sysroot for finding arm64 libraries (Qt5, MPP, OpenCV headers, FFmpeg)
-set(CMAKE_SYSROOT /home/rambos/sysroot)
-set(CMAKE_FIND_ROOT_PATH /home/rambos/sysroot)
+# Board sysroot for finding arm64 libraries and FFmpeg-rockchip headers.
+set(ALERTGATEWAY_SYSROOT "/home/rambos/sysroot" CACHE PATH "Board sysroot")
+set(CMAKE_SYSROOT "${ALERTGATEWAY_SYSROOT}")
+set(CMAKE_FIND_ROOT_PATH "${ALERTGATEWAY_SYSROOT}")
 
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)

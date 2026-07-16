@@ -56,6 +56,7 @@ void CaptureThread::stop() {
 }
 
 void CaptureThread::run() {
+    uint64_t next_frame_id = 0;
     while (running_) {
         // select 阻塞等待摄像头帧就绪，超时 2s 后继续循环（检查 running_ 标志）
         fd_set fds;
@@ -78,8 +79,10 @@ void CaptureThread::run() {
         Frame frame;
         frame.width  = cfg_.width;
         frame.height = cfg_.height;
-        frame.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        frame.frame_id = ++next_frame_id;
+        frame.pts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
+        frame.timestamp_ms = frame.pts_ms;
 
         // 将 mmap 缓冲区数据拷贝到 Frame（YUYV422 格式，宽×高×2 字节）
         // 拷贝后立即归还缓冲区（VIDIOC_QBUF），内核可继续复用此缓冲区采集下一帧
@@ -89,7 +92,7 @@ void CaptureThread::run() {
         // 向 InferThread 投递帧副本，非阻塞（timeout=0）
         // InferThread 忙时 push 返回 false，帧被丢弃，不影响采集节奏
         Frame infer_copy = frame;
-        infer_queue_.push(std::move(infer_copy), 0);
+        infer_queue_.push_latest(std::move(infer_copy));
 
         // 向 EncodeThread 投递帧，阻塞等待至多 100ms
         // enc_queue 容量=1，此处是唯一的背压点：编码跟不上时采集会短暂等待

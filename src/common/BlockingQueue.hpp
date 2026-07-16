@@ -38,6 +38,21 @@ public:
         return true;
     }
 
+    // 最新帧语义：队列满时淘汰尚未消费的旧项，再写入新项。
+    // 用于采集→推理链路，保证推理开始时拿到的永远是最近画面，而不是最早积压画面。
+    bool push_latest(T item, size_t* replaced = nullptr) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (closed_) return false;
+        if (queue_.size() >= max_size_) {
+            queue_.pop();
+            if (replaced) ++*replaced;
+        }
+        queue_.push(std::move(item));
+        lock.unlock();
+        not_empty_.notify_one();
+        return true;
+    }
+
     // 从队列取出一项。队列空时：
     //   timeout_ms < 0  → 永久阻塞等待数据
     //   timeout_ms = 0  → 立即返回 false

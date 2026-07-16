@@ -1,0 +1,13 @@
+{
+  "baseline": "yolov8s_desktop6_final_30e_20260710",
+  "target": "SiLU represented as Sigmoid+Mul",
+  "replacement": "ReLU6",
+  "reason": "reduce activation subgraph only if RKNN profiling shows Sigmoid/Mul hotspot",
+  "guardrails": [
+    "keep baseline weights untouched",
+    "train replacement model from baseline weights",
+    "compare val/test mAP",
+    "compare RKNN rknn_run and outputs_get",
+    "rollback if mAP50 drops or latency regresses"
+  ]
+}

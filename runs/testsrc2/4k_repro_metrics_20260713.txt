@@ -1,0 +1,5 @@
+input=3840x2160 H.264 High yuvj420p 30.03fps ~42.8Mbps
+output=3840x2160 H.264 15/1 nominal 91/6 average fps 3.111629Mbps 17.999s 7000777 bytes
+inference_total_ms=36.5..49.1 typical 42..45
+npu_ms=25.8..29.2
+mpp=3840x2160 15fps CBR 3000kbps gop8

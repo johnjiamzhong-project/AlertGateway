@@ -1,0 +1,15 @@
+{
+  "teacher": "six-class YOLOv8s baseline best.pt",
+  "student": "first validated structured-pruned baseline",
+  "losses": [
+    "box regression distillation",
+    "classification logits distillation",
+    "feature distillation at P3/P4/P5"
+  ],
+  "temperature": 2.0,
+  "acceptance": [
+    "test mAP50 not below baseline minus 3 points",
+    "RKNN rknn_run lower than baseline 50.707 ms",
+    "same 640 letterbox and 6-class output contract"
+  ]
+}

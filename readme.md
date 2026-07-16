@@ -57,9 +57,9 @@
 
 | 任务 | 说明 |
 |------|------|
-| **Thumbnail 缩略图** | 检测后生成指定尺寸缩略图，附加到 MQTT payload（RGA 硬件缩放）|
-| **ROI 区域追踪** | 圈定感兴趣区域（归一化坐标），仅处理 ROI 内目标，支持停留时长追踪与进出事件上报 |
-| **ROI Tiling 推理** | 对 ROI 内区域做网格切分分别推理，弥补 4K 缩放后小目标漏检，结果合并全局 NMS |
+| **Thumbnail 缩略图** | 检测后生成指定尺寸 NV12 缩略图并附加到 MQTT payload（当前为 CPU 正确性路径，RGA/JPEG 为后续优化）|
+| **ROI 区域追踪** | 圈定感兴趣区域（归一化坐标），仅保留 ROI 内目标，支持停留时长追踪与进出事件上报；代码已实现，板端专项验证待完成 |
+| **ROI Tiling 推理** | 对 ROI 内区域做网格切分分别推理，弥补 4K 缩放后小目标漏检，结果合并全局 NMS；代码已实现，板端专项验证待完成 |
 
 
 ### 检测目标类别
@@ -150,23 +150,25 @@ AlertGateway/
 ├── CMakeLists.txt
 ├── readme.md
 ├── config/
-│   └── config.json          # 运行时配置
+│   ├── config.json          # 公共配置与 active_config 入口
+│   ├── config_v4l2.json     # V4L2 摄像头配置
+│   └── config_4k_18mbps.json # 4K pull_stream 配置
 ├── src/
 │   ├── main.cpp
 │   ├── common/
 │   │   ├── BlockingQueue.hpp    # 有界阻塞队列
 │   │   └── Frame.hpp            # 帧数据结构（含 pixel_format 字段）
 │   ├── capture/
-│   │   ├── IVideoSource.hpp     # 视频源抽象接口（待开发）
+│   │   ├── IVideoSource.hpp     # 视频源抽象接口
 │   │   ├── CaptureThread.cpp    # V4L2 采集线程
-│   │   └── PullStreamThread.cpp # RTMP/RTSP 拉流线程（待开发）
+│   │   └── PullStreamThread.cpp # RTMP/RTSP 拉流线程
 │   ├── infer/
 │   │   ├── InferThread.cpp      # RKNN 推理线程
 │   │   ├── RockchipYoloPostprocess.cpp # 官方九输出后处理
 │   │   ├── YoloPostprocess.cpp  # 旧双输出后处理 + 类别过滤
-│   │   ├── ThumbnailTask.cpp    # 缩略图生成任务（待开发）
-│   │   ├── RoiFilter.cpp        # ROI 过滤与追踪（待开发）
-│   │   └── TilingTask.cpp       # ROI Tiling 推理（待开发）
+│   │   ├── ThumbnailTask.cpp    # 缩略图生成任务
+│   │   ├── RoiFilter.cpp        # ROI 过滤与追踪
+│   │   └── TilingTask.cpp       # ROI Tiling 推理
 │   ├── encode/
 │   │   ├── EncodeThread.cpp     # MPP 硬编线程
 │   │   ├── font8x16.h           # ASCII 标签字体
@@ -201,13 +203,13 @@ AlertGateway/
 }
 ```
 
-两个分配置文件只保存差异项：
+两个分配置文件分别保存对应运行模式的完整差异配置：
 
-- `config/config_v4l2.json`：V4L2 源、640×480、3 Mbps 和对应 RTMP 地址。
-- `config/config_4k_18mbps.json`：4K `pull_stream` 源、3840×2160、18 Mbps 和对应 RTMP 地址。
+- `config/config_v4l2.json`：V4L2 源、640×480、3 Mbps、对应 RTMP 地址，以及 Thumbnail/ROI/Tiling 开关。
+- `config/config_4k_18mbps.json`：4K `pull_stream` 源、3840×2160、18 Mbps、对应 RTMP 地址，以及 4K 专用的 Thumbnail/ROI/Tiling 开关。
 
 切换 4K 时只将 `active_config` 改为 `"config_4k_18mbps.json"`。程序会先加载公共配置，
-再递归合并选中的分配置；分辨率、码率、源地址等差异参数只在对应文件中维护。
+再递归合并选中的分配置；视频源、分辨率、码率和图像处理参数均由对应模式配置明确维护。
 
 > `source.type` 可设为 `"v4l2"`（本地摄像头，默认）或 `"pull_stream"`（RTMP/RTSP 拉流）。  
 > 旧版 `camera` 节点继续支持，自动映射为 `source.type=v4l2`，向下兼容。
@@ -247,7 +249,8 @@ ssh firefly@192.168.0.201 \
 ```
 
 201 板拉取 `live/testsrc2` 输入流，完成 RKNN 推理和 MPP H.264 编码后输出到
-`rtmp://192.168.0.168/live/v4l2_720p_result`，播放器可直接查看该地址。输出流名称保留
+`rtmp://192.168.0.168/live/alertgateway`，播放器可直接查看该地址。项目所有推理结果
+推流统一使用该固定地址。输出流名称保留
 历史上的 `v4l2_720p` 名称，实际尺寸为 3840×2160。恢复 V4L2 测试时，将
 `active_config` 改回 `config_v4l2.json` 并重启程序。
 
@@ -360,10 +363,11 @@ cd ~/AlertGateway
 - [x] 叠框中文标签与可配置码率（已实施并验证）
 - [x] 后处理循环 L1/L2 缓存优化（中位数 4.14 ms → 2.86 ms，降幅 31%）
 - [x] 持久化 performance 锁频服务（`tools/performance/rockchip-performance.service`）
-- [ ] **视频源抽象层**（`IVideoSource` + `PullStreamThread`，RTMP/RTSP 拉流）
-- [ ] **Thumbnail 缩略图任务**（RGA 缩放，MQTT 附图）
-- [ ] **ROI 区域过滤与追踪**（归一化坐标，帧间 IoU 追踪，停留事件）
-- [ ] **ROI Tiling 推理**（小目标增强，全局 NMS 合并）
+- [x] **视频源抽象层**（`IVideoSource` + `PullStreamThread`，支持 V4L2 与 RTMP/RTSP 拉流）
+- [x] **V4L2/4K 配置选择**（`active_config`、V4L2 配置与 4K `pull_stream` 配置）
+- [x] **Thumbnail 缩略图任务**（NV12 缩略图、MQTT 附图；RGA/JPEG 仍为后续优化）
+- [ ] **ROI 区域过滤与追踪**（代码已实现；归一化坐标、帧间 IoU 追踪、停留事件待板端专项验证）
+- [ ] **ROI Tiling 推理**（代码已实现；小目标增强、坐标映射、全局 NMS 合并待板端专项验证）
 - [ ] 多路架构扩展（Channel ID 抽象，多路 `PullStreamThread` 实例）
 
 ---

@@ -16,6 +16,7 @@ struct EncodeConfig {
     int fps;
     int bitrate_kbps = 2000;  // CBR目标码率；RTMP直播推流要稳定带宽，不用VBR换画质
     bool draw_detection_labels = true;
+    int detection_alignment_delay_frames = 2; // 仅延后编码，帧率保持不变
 };
 
 // 编码线程：取帧 → YUYV直转NV12 → 叠最新检测框 → MPP硬编码H.264 → 写EncodedPacket队列。

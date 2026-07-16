@@ -1,0 +1,61 @@
+{
+  "source": {
+    "type": "pull_stream",
+    "url": "rtmp://192.168.0.168/live/testsrc2",
+    "width": 3840,
+    "height": 2160,
+    "fps": 30,
+    "reconnect_sec": 5
+  },
+  "image_processing": {
+    "thumbnail": {"enabled": false, "width": 320, "height": 180, "on_detection_only": true},
+    "roi": {"enabled": false, "regions": [], "filter_outside": true, "track_dwell_sec": 0.0},
+    "tiling": {"enabled": false, "grid_cols": 2, "grid_rows": 1, "overlap_ratio": 0.1, "merge_iou_threshold": 0.45}
+  },
+  "model": {
+    "path": "model/yolov8s_rockchip_dfl.rknn",
+    "output_layout": "rockchip_dfl",
+    "conf_threshold": 0.25,
+    "iou_threshold": 0.45,
+    "track_confirm_hits": 2,
+    "track_ttl_ms": 300,
+    "track_match_iou": 0.20,
+    "track_center_distance_ratio": 0.12,
+    "track_display_mode": 1,
+    "track_ema_alpha": 0.25,
+    "track_deadzone_center_px": 6.0,
+    "track_deadzone_size_ratio": 0.01,
+    "track_innovation_iou": 0.45,
+    "track_max_correction_px": 120.0,
+    "track_jump_confirm_hits": 2,
+    "track_align_to_video_pts": true,
+    "track_adaptive_filter": true,
+    "track_center_alpha_min": 0.18,
+    "track_center_alpha_max": 0.90,
+    "track_size_alpha_min": 0.12,
+    "track_size_alpha_max": 0.45,
+    "track_motion_full_response_ratio": 1.20,
+    "track_motion_smoothing_alpha": 0.35,
+    "track_display_hold_ms": 100,
+    "track_debug_logging": true,
+    "track_reversal_damping_enabled": true,
+    "track_reversal_center_alpha_max": 0.35,
+    "track_reversal_min_motion_ratio": 0.005
+  },
+  "detection": {
+    "target_classes": ["cell phone", "cup", "keyboard", "mouse", "laptop", "book"],
+    "report_interval_sec": 1
+  },
+  "stream": {
+    "rtmp_url": "rtmp://192.168.0.168/live/alertgateway",
+    "bitrate_kbps": 18000,
+    "draw_detection_labels": true,
+    "detection_alignment_delay_frames": 3
+  },
+  "mqtt": {
+    "broker": "127.0.0.1",
+    "port": 1883,
+    "topic": "desk/testsrc2_detect",
+    "client_id": "AlertGateway-4k-track-test"
+  }
+}
