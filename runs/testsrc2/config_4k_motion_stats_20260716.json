@@ -1,5 +1,12 @@
 {
-  "active_config": "config_4k_18mbps.json",
+  "source": {
+    "type": "pull_stream",
+    "url": "rtmp://192.168.0.168/live/testsrc2",
+    "width": 3840,
+    "height": 2160,
+    "fps": 30,
+    "reconnect_sec": 5
+  },
   "model": {
     "path": "model/yolov8s_rockchip_dfl.rknn",
     "output_layout": "rockchip_dfl",
@@ -22,8 +29,8 @@
     "track_center_alpha_max": 0.90,
     "track_size_alpha_min": 0.12,
     "track_size_alpha_max": 0.45,
-    "track_center_gated_size_filter": false,
-    "track_low_motion_size_alpha_max": 0.20,
+    "track_center_gated_size_filter": true,
+    "track_low_motion_size_alpha_max": 0.30,
     "track_motion_full_response_ratio": 1.20,
     "track_motion_smoothing_alpha": 0.35,
     "track_display_hold_ms": 100,
@@ -31,16 +38,15 @@
     "track_reversal_damping_enabled": false,
     "track_reversal_center_alpha_max": 0.35,
     "track_reversal_min_motion_ratio": 0.005,
-    "track_motion_stats_logging": false,
-    "track_global_motion_center_filter": false,
-    "track_global_motion_smoothing_alpha": 0.25,
-    "track_global_motion_min_tracks": 3
+    "track_motion_stats_logging": true
   },
   "detection": {
     "target_classes": ["cell phone", "cup", "keyboard", "mouse", "laptop", "book"],
     "report_interval_sec": 1
   },
   "stream": {
+    "rtmp_url": "rtmp://192.168.0.168/live/alertgateway",
+    "bitrate_kbps": 18000,
     "draw_detection_labels": true,
     "detection_alignment_delay_frames": 3
   },
@@ -48,6 +54,6 @@
     "broker": "192.168.0.168",
     "port": 1883,
     "topic": "desk/detect",
-    "client_id": "AlertGateway-01"
+    "client_id": "AlertGateway-motion-stats-20260716"
   }
 }

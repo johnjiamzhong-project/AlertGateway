@@ -149,13 +149,19 @@ int main(int argc, char* argv[]) {
         cfg["model"].value("track_center_alpha_max", 0.90f),
         cfg["model"].value("track_size_alpha_min", 0.12f),
         cfg["model"].value("track_size_alpha_max", 0.45f),
+        cfg["model"].value("track_center_gated_size_filter", false),
+        cfg["model"].value("track_low_motion_size_alpha_max", 0.20f),
         cfg["model"].value("track_motion_full_response_ratio", 1.20f),
         cfg["model"].value("track_motion_smoothing_alpha", 0.35f),
         cfg["model"].value("track_display_hold_ms", 100),
         cfg["model"].value("track_debug_logging", false),
         cfg["model"].value("track_reversal_damping_enabled", false),
         cfg["model"].value("track_reversal_center_alpha_max", 0.35f),
-        cfg["model"].value("track_reversal_min_motion_ratio", 0.005f)
+        cfg["model"].value("track_reversal_min_motion_ratio", 0.005f),
+        cfg["model"].value("track_motion_stats_logging", false),
+        cfg["model"].value("track_global_motion_center_filter", false),
+        cfg["model"].value("track_global_motion_smoothing_alpha", 0.25f),
+        cfg["model"].value("track_global_motion_min_tracks", 3)
     };
     if (model_cfg.track_display_mode < 0 || model_cfg.track_display_mode > 1) {
         std::cerr << "Config error: model.track_display_mode must be 0 (raw) or 1 (adaptive)\n";
@@ -165,6 +171,19 @@ int main(int argc, char* argv[]) {
         model_cfg.track_reversal_center_alpha_max > 1.0f ||
         model_cfg.track_reversal_min_motion_ratio < 0.0f) {
         std::cerr << "Config error: invalid model.track_reversal_* value\n";
+        return 1;
+    }
+    if (model_cfg.track_center_gated_size_filter &&
+        (model_cfg.track_low_motion_size_alpha_max < model_cfg.track_size_alpha_min ||
+         model_cfg.track_low_motion_size_alpha_max > model_cfg.track_size_alpha_max)) {
+        std::cerr << "Config error: model.track_low_motion_size_alpha_max must be within "
+                     "[track_size_alpha_min, track_size_alpha_max]\n";
+        return 1;
+    }
+    if (model_cfg.track_global_motion_smoothing_alpha < 0.0f ||
+        model_cfg.track_global_motion_smoothing_alpha > 1.0f ||
+        model_cfg.track_global_motion_min_tracks < 2) {
+        std::cerr << "Config error: invalid model.track_global_motion_* value\n";
         return 1;
     }
 
@@ -248,13 +267,19 @@ int main(int argc, char* argv[]) {
                                   model_cfg.track_center_alpha_max,
                                   model_cfg.track_size_alpha_min,
                                   model_cfg.track_size_alpha_max,
+                                  model_cfg.track_center_gated_size_filter,
+                                  model_cfg.track_low_motion_size_alpha_max,
                                   model_cfg.track_motion_full_response_ratio,
                                   model_cfg.track_motion_smoothing_alpha,
                                   model_cfg.track_display_hold_ms,
                                   model_cfg.track_debug_logging,
                                   model_cfg.track_reversal_damping_enabled,
                                   model_cfg.track_reversal_center_alpha_max,
-                                  model_cfg.track_reversal_min_motion_ratio});
+                                  model_cfg.track_reversal_min_motion_ratio,
+                                  model_cfg.track_motion_stats_logging,
+                                  model_cfg.track_global_motion_center_filter,
+                                  model_cfg.track_global_motion_smoothing_alpha,
+                                  model_cfg.track_global_motion_min_tracks});
 
     // enc_queue 容量=1：约 68ms 缓冲，背压控制采集速度
     BlockingQueue<Frame>         enc_queue(1);

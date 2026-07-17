@@ -42,6 +42,8 @@ struct ModelConfig {
     float track_center_alpha_max = 0.90f;
     float track_size_alpha_min = 0.12f;
     float track_size_alpha_max = 0.45f;
+    bool track_center_gated_size_filter = false;
+    float track_low_motion_size_alpha_max = 0.20f;
     float track_motion_full_response_ratio = 1.20f;
     float track_motion_smoothing_alpha = 0.35f;
     int track_display_hold_ms = 100;
@@ -49,6 +51,10 @@ struct ModelConfig {
     bool track_reversal_damping_enabled = false;
     float track_reversal_center_alpha_max = 0.35f;
     float track_reversal_min_motion_ratio = 0.005f;
+    bool track_motion_stats_logging = false;
+    bool track_global_motion_center_filter = false;
+    float track_global_motion_smoothing_alpha = 0.25f;
+    int track_global_motion_min_tracks = 3;
 };
 struct DetectionConfig {
     int report_interval_sec = 1;

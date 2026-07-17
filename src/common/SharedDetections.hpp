@@ -4,8 +4,11 @@
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <sstream>
+#include <utility>
 #include <vector>
 #include "common/Frame.hpp"
 
@@ -28,6 +31,8 @@ struct TrackerConfig {
     float center_alpha_max = 0.90f;
     float size_alpha_min = 0.12f;
     float size_alpha_max = 0.45f;
+    bool center_gated_size_filter = false;
+    float low_motion_size_alpha_max = 0.20f;
     float motion_full_response_ratio = 1.20f;
     float motion_smoothing_alpha = 0.35f;
     int display_hold_ms = 100;
@@ -35,6 +40,12 @@ struct TrackerConfig {
     bool reversal_damping_enabled = false;
     float reversal_center_alpha_max = 0.35f;
     float reversal_min_motion_ratio = 0.005f;
+    // 仅用于诊断，不改变轨迹或叠框逻辑；按 Active Track 的稳健中心统计整体运动。
+    bool motion_stats_logging = false;
+    // 使用同一检测帧至少三个 Active Track 的中位共同位移平滑慢速镜头运动；不外推未来位置。
+    bool global_motion_center_filter = false;
+    float global_motion_smoothing_alpha = 0.25f;
+    int global_motion_min_tracks = 3;
 };
 
 struct DisplayDetections {
@@ -87,13 +98,82 @@ struct SharedDetections {
         }
         std::sort(candidates.begin(), candidates.end(),
                   [](const Candidate& a, const Candidate& b) { return a.score > b.score; });
+        std::vector<Candidate> selected_candidates;
+        std::vector<bool> selected_tracks(tracks_.size(), false), selected_dets(dets.size(), false);
+        for (const Candidate& candidate : candidates) {
+            if (selected_tracks[candidate.track] || selected_dets[candidate.detection]) continue;
+            selected_tracks[candidate.track] = true;
+            selected_dets[candidate.detection] = true;
+            selected_candidates.push_back(candidate);
+        }
+
+        bool global_motion_used = false;
+        float global_motion_dx = 0.0f;
+        float global_motion_dy = 0.0f;
+        if (config_.global_motion_center_filter) {
+            struct GlobalMotionSample { float dx, dy; };
+            std::vector<GlobalMotionSample> global_samples;
+            for (const Candidate& candidate : selected_candidates) {
+                const Track& track = tracks_[candidate.track];
+                const int64_t dt_ms = pts_ms - track.last_detection_pts_ms;
+                if (track.state != TrackState::Active || dt_ms < 10 || dt_ms > 250) continue;
+                const Detection& measured = dets[candidate.detection];
+                global_samples.push_back({
+                    (measured.x1 + measured.x2 - track.last_measurement.x1 - track.last_measurement.x2) * 0.5f,
+                    (measured.y1 + measured.y2 - track.last_measurement.y1 - track.last_measurement.y2) * 0.5f
+                });
+            }
+            if (global_samples.size() >= static_cast<size_t>(std::max(1, config_.global_motion_min_tracks))) {
+                const auto median = [](std::vector<float>& values) {
+                    const size_t middle = values.size() / 2;
+                    std::nth_element(values.begin(), values.begin() + middle, values.end());
+                    float result = values[middle];
+                    if ((values.size() & 1u) == 0u) {
+                        result = (result + *std::max_element(values.begin(), values.begin() + middle)) * 0.5f;
+                    }
+                    return result;
+                };
+                std::vector<float> global_dxs, global_dys;
+                global_dxs.reserve(global_samples.size());
+                global_dys.reserve(global_samples.size());
+                for (const GlobalMotionSample& sample : global_samples) {
+                    global_dxs.push_back(sample.dx);
+                    global_dys.push_back(sample.dy);
+                }
+                float measured_dx = median(global_dxs);
+                float measured_dy = median(global_dys);
+                const bool stale = !global_motion_valid_ ||
+                    pts_ms - global_motion_pts_ms_ > 250 || pts_ms <= global_motion_pts_ms_;
+                const float alpha = std::clamp(config_.global_motion_smoothing_alpha, 0.0f, 1.0f);
+                if (stale) {
+                    filtered_global_motion_dx_ = measured_dx;
+                    filtered_global_motion_dy_ = measured_dy;
+                } else {
+                    filtered_global_motion_dx_ = alpha * measured_dx +
+                        (1.0f - alpha) * filtered_global_motion_dx_;
+                    filtered_global_motion_dy_ = alpha * measured_dy +
+                        (1.0f - alpha) * filtered_global_motion_dy_;
+                }
+                global_motion_pts_ms_ = pts_ms;
+                global_motion_valid_ = true;
+                global_motion_dx = filtered_global_motion_dx_;
+                global_motion_dy = filtered_global_motion_dy_;
+                global_motion_used = true;
+            }
+        }
+
         std::vector<bool> matched_tracks(tracks_.size(), false), matched_dets(dets.size(), false);
-        for (const Candidate& c : candidates) {
-            if (matched_tracks[c.track] || matched_dets[c.detection]) continue;
+        std::vector<MotionSample> matched_motion;
+        for (const Candidate& c : selected_candidates) {
             Track& track = tracks_[c.track];
             track.last_reversal_damped = false;
+            const bool was_active = track.state == TrackState::Active;
             const Detection prior_smooth = track.smooth;
             const float dt_sec = std::max(0.001f, static_cast<float>(pts_ms - track.last_detection_pts_ms) / 1000.0f);
+            const float raw_dx = (dets[c.detection].x1 + dets[c.detection].x2 -
+                                 track.last_measurement.x1 - track.last_measurement.x2) * 0.5f;
+            const float raw_dy = (dets[c.detection].y1 + dets[c.detection].y2 -
+                                 track.last_measurement.y1 - track.last_measurement.y2) * 0.5f;
             const bool innovation = c.distance > config_.max_correction_px &&
                                     c.overlap < config_.innovation_iou;
             const bool requires_innovation_confirmation =
@@ -120,6 +200,7 @@ struct SharedDetections {
             bool filter_reset = false;
             float center_alpha = config_.ema_alpha;
             float size_alpha = config_.ema_alpha;
+            float effective_size_alpha_max = config_.size_alpha_max;
             if (!deadzone) {
                 // 中心和尺寸分开滤波。运动量按目标自身尺寸归一化，因此不依赖 4K 固定像素阈值。
                 // 静止时中心/尺寸强平滑；快速运动时只让中心快速跟随，尺寸仍保持较强抑噪。
@@ -132,7 +213,10 @@ struct SharedDetections {
                     center_alpha = size_alpha = 1.0f;
                 } else if (config_.adaptive_filter) {
                     smooth_measurement = adaptive_box(track, prior_smooth, dets[c.detection], dt_sec,
-                                                      &center_alpha, &size_alpha);
+                                                      &center_alpha, &size_alpha,
+                                                      &effective_size_alpha_max,
+                                                      global_motion_used ? global_motion_dx : 0.0f,
+                                                      global_motion_used ? global_motion_dy : 0.0f);
                 } else {
                     smooth_measurement = ema_box(prior_smooth, dets[c.detection], config_.ema_alpha);
                 }
@@ -144,6 +228,10 @@ struct SharedDetections {
             track.last_measurement = dets[c.detection];
             track.last_center_alpha = center_alpha;
             track.last_size_alpha = size_alpha;
+            track.last_effective_size_alpha_max = effective_size_alpha_max;
+            track.last_global_motion_used = global_motion_used && !deadzone && !filter_reset;
+            track.last_global_motion_dx = track.last_global_motion_used ? global_motion_dx : 0.0f;
+            track.last_global_motion_dy = track.last_global_motion_used ? global_motion_dy : 0.0f;
             smooth_measurement.score = dets[c.detection].score;
             // 单次校正有上限，避免一个大偏差把显示框直接拉离目标。
             if (!filter_reset) {
@@ -159,6 +247,11 @@ struct SharedDetections {
             if (track.hits >= config_.confirm_hits) track.state = TrackState::Active;
             matched_tracks[c.track] = matched_dets[c.detection] = true;
             ++last_matched_;
+            log_motion_track(track, frame_id, pts_ms, dt_sec, dets[c.detection],
+                             deadzone, filter_reset, was_active);
+            if (was_active) {
+                matched_motion.push_back({track.id, dets[c.detection], track.smooth, raw_dx, raw_dy});
+            }
             log_update(track, frame_id, pts_ms, dt_sec, dets[c.detection], smooth_measurement,
                        c.overlap, c.distance, deadzone, false, innovation, innovation_confirmed);
         }
@@ -169,6 +262,8 @@ struct SharedDetections {
             track.state = config_.confirm_hits <= 1 ? TrackState::Active : TrackState::Tentative;
             tracks_.push_back(track);
             ++last_created_;
+            log_motion_track(track, frame_id, pts_ms, 0.0f, dets[di],
+                             false, true, false);
             log_update(track, frame_id, pts_ms, 0.0f, dets[di], dets[di],
                        0.0f, 0.0f, false, true, false, false);
         }
@@ -189,6 +284,7 @@ struct SharedDetections {
         std::vector<Detection> snapshot_detections;
         for (const Track& track : tracks_)
             if (is_displayable(track, pts_ms)) snapshot_detections.push_back(track.smooth);
+        update_motion_stats(matched_motion, frame_id, pts_ms);
         publish_snapshot(frame_id, pts_ms, std::move(snapshot_detections));
     }
 
@@ -250,13 +346,163 @@ private:
         float filtered_size_motion = 0.0f;
         float last_center_alpha = 1.0f;
         float last_size_alpha = 1.0f;
+        float last_effective_size_alpha_max = 0.45f;
         float last_center_dx = 0.0f;
         float last_center_dy = 0.0f;
         bool last_center_delta_valid = false;
         bool last_reversal_damped = false;
+        bool last_global_motion_used = false;
+        float last_global_motion_dx = 0.0f;
+        float last_global_motion_dy = 0.0f;
     };
     struct Snapshot { uint64_t frame_id; int64_t pts_ms; std::vector<Detection> detections; };
     struct Candidate { size_t track, detection; float overlap, distance, score; };
+    struct MotionSample {
+        uint64_t track_id;
+        Detection raw;
+        Detection smooth;
+        float raw_dx;
+        float raw_dy;
+    };
+    static std::pair<float, float> median_center(const std::vector<Detection>& boxes) {
+        if (boxes.empty()) return {0.0f, 0.0f};
+        std::vector<float> xs, ys;
+        xs.reserve(boxes.size());
+        ys.reserve(boxes.size());
+        for (const Detection& box : boxes) {
+            xs.push_back((box.x1 + box.x2) * 0.5f);
+            ys.push_back((box.y1 + box.y2) * 0.5f);
+        }
+        const auto middle = [](std::vector<float>& values) {
+            const size_t mid = values.size() / 2;
+            std::nth_element(values.begin(), values.begin() + mid, values.end());
+            float result = values[mid];
+            if ((values.size() & 1u) == 0u) {
+                const auto lower = std::max_element(values.begin(), values.begin() + mid);
+                result = (result + *lower) * 0.5f;
+            }
+            return result;
+        };
+        return {middle(xs), middle(ys)};
+    }
+    static std::pair<float, float> median_size(const std::vector<Detection>& boxes) {
+        if (boxes.empty()) return {0.0f, 0.0f};
+        std::vector<float> widths, heights;
+        widths.reserve(boxes.size());
+        heights.reserve(boxes.size());
+        for (const Detection& box : boxes) {
+            widths.push_back(std::max(1.0f, box.x2 - box.x1));
+            heights.push_back(std::max(1.0f, box.y2 - box.y1));
+        }
+        const auto middle = [](std::vector<float>& values) {
+            const size_t mid = values.size() / 2;
+            std::nth_element(values.begin(), values.begin() + mid, values.end());
+            float result = values[mid];
+            if ((values.size() & 1u) == 0u) {
+                const auto lower = std::max_element(values.begin(), values.begin() + mid);
+                result = (result + *lower) * 0.5f;
+            }
+            return result;
+        };
+        return {middle(widths), middle(heights)};
+    }
+    void update_motion_stats(const std::vector<MotionSample>& current,
+                             uint64_t frame_id, int64_t pts_ms) {
+        if (!config_.motion_stats_logging) return;
+        if (current.empty()) {
+            previous_motion_samples_.clear();
+            previous_motion_pts_ms_ = 0;
+            return;
+        }
+        std::vector<Detection> raw_current, smooth_current, raw_previous, smooth_previous;
+        std::vector<uint64_t> active_ids, stable_ids;
+        active_ids.reserve(current.size());
+        stable_ids.reserve(current.size());
+        size_t raw_reversal_count = 0;
+        for (const MotionSample& sample : current) {
+            active_ids.push_back(sample.track_id);
+            const auto previous = std::find_if(previous_motion_samples_.begin(), previous_motion_samples_.end(),
+                [&](const MotionSample& item) { return item.track_id == sample.track_id; });
+            if (previous == previous_motion_samples_.end()) continue;
+            stable_ids.push_back(sample.track_id);
+            raw_current.push_back(sample.raw);
+            smooth_current.push_back(sample.smooth);
+            raw_previous.push_back(previous->raw);
+            smooth_previous.push_back(previous->smooth);
+            const float current_step = std::hypot(sample.raw_dx, sample.raw_dy);
+            const float previous_step = std::hypot(previous->raw_dx, previous->raw_dy);
+            if (current_step > 0.0f && previous_step > 0.0f &&
+                sample.raw_dx * previous->raw_dx + sample.raw_dy * previous->raw_dy < 0.0f) {
+                ++raw_reversal_count;
+            }
+        }
+        const int64_t previous_pts_ms = previous_motion_pts_ms_;
+        previous_motion_samples_ = current;
+        previous_motion_pts_ms_ = pts_ms;
+        const size_t stable_tracks = raw_current.size();
+        if (stable_tracks == 0) return;
+        const auto raw_center = median_center(raw_current);
+        const auto smooth_center = median_center(smooth_current);
+        const auto previous_raw_center = median_center(raw_previous);
+        const auto previous_smooth_center = median_center(smooth_previous);
+        const auto raw_size = median_size(raw_current);
+        const auto smooth_size = median_size(smooth_current);
+        const auto previous_raw_size = median_size(raw_previous);
+        const auto previous_smooth_size = median_size(smooth_previous);
+        const float raw_dx = raw_center.first - previous_raw_center.first;
+        const float raw_dy = raw_center.second - previous_raw_center.second;
+        const float smooth_dx = smooth_center.first - previous_smooth_center.first;
+        const float smooth_dy = smooth_center.second - previous_smooth_center.second;
+        const int64_t dt_ms = previous_pts_ms == 0 ? 0 : pts_ms - previous_pts_ms;
+        const float center_gap = std::hypot(raw_center.first - smooth_center.first,
+                                            raw_center.second - smooth_center.second);
+        const float delta_gap = std::hypot(raw_dx - smooth_dx, raw_dy - smooth_dy);
+        const float reference_diagonal = std::max(1.0f, std::hypot(raw_size.first, raw_size.second));
+        const float center_gap_ratio = center_gap / reference_diagonal;
+        const float raw_step_ratio = std::hypot(raw_dx, raw_dy) / reference_diagonal;
+        const float smooth_step_ratio = std::hypot(smooth_dx, smooth_dy) / reference_diagonal;
+        const float raw_size_step = std::hypot(
+            std::log(raw_size.first / std::max(1.0f, previous_raw_size.first)),
+            std::log(raw_size.second / std::max(1.0f, previous_raw_size.second)));
+        const float smooth_size_step = std::hypot(
+            std::log(smooth_size.first / std::max(1.0f, previous_smooth_size.first)),
+            std::log(smooth_size.second / std::max(1.0f, previous_smooth_size.second)));
+        std::sort(active_ids.begin(), active_ids.end());
+        std::sort(stable_ids.begin(), stable_ids.end());
+        std::cout << "[MotionStats] frame=" << frame_id
+                  << " pts_ms=" << pts_ms
+                  << " matched_active=" << current.size()
+                  << " stable_tracks=" << stable_tracks
+                  << " raw_center=" << raw_center.first << "," << raw_center.second
+                  << " smooth_center=" << smooth_center.first << "," << smooth_center.second
+                  << " raw_size=" << raw_size.first << "," << raw_size.second
+                  << " smooth_size=" << smooth_size.first << "," << smooth_size.second
+                  << " raw_delta=" << raw_dx << "," << raw_dy
+                  << " smooth_delta=" << smooth_dx << "," << smooth_dy
+                  << " dt_ms=" << dt_ms
+                  << " center_gap=" << center_gap
+                  << " center_gap_ratio=" << center_gap_ratio
+                  << " delta_gap=" << delta_gap
+                  << " raw_step_ratio=" << raw_step_ratio
+                  << " smooth_step_ratio=" << smooth_step_ratio
+                  << " raw_size_step=" << raw_size_step
+                  << " smooth_size_step=" << smooth_size_step
+                  << " raw_reversals=" << raw_reversal_count
+                  << " created=" << last_created_
+                  << " lost=" << last_lost_
+                  << " active_ids=";
+        for (size_t i = 0; i < active_ids.size(); ++i) {
+            if (i) std::cout << ',';
+            std::cout << active_ids[i];
+        }
+        std::cout << " stable_ids=";
+        for (size_t i = 0; i < stable_ids.size(); ++i) {
+            if (i) std::cout << ',';
+            std::cout << stable_ids[i];
+        }
+        std::cout << '\n';
+        if (frame_id % 30 == 0) std::cout << std::flush;
+    }
     static float iou(const Detection& a, const Detection& b) {
         float x1=std::max(a.x1,b.x1), y1=std::max(a.y1,b.y1), x2=std::min(a.x2,b.x2), y2=std::min(a.y2,b.y2);
         float in=std::max(0.0f,x2-x1)*std::max(0.0f,y2-y1), aa=std::max(0.0f,a.x2-a.x1)*std::max(0.0f,a.y2-a.y1), ab=std::max(0.0f,b.x2-b.x1)*std::max(0.0f,b.y2-b.y1);
@@ -278,7 +524,9 @@ private:
         out.x1=cx-w*0.5f; out.x2=cx+w*0.5f; out.y1=cy-h*0.5f; out.y2=cy+h*0.5f; return out;
     }
     Detection adaptive_box(Track& track, const Detection& previous, const Detection& measured,
-                           float dt_sec, float* center_alpha_out, float* size_alpha_out) {
+                           float dt_sec, float* center_alpha_out, float* size_alpha_out,
+                           float* effective_size_alpha_max_out,
+                           float global_motion_dx, float global_motion_dy) {
         const float pcx = (previous.x1 + previous.x2) * 0.5f;
         const float pcy = (previous.y1 + previous.y2) * 0.5f;
         const float pw = std::max(1.0f, previous.x2 - previous.x1);
@@ -312,8 +560,16 @@ private:
         const float size_response = response(raw_size_motion, track.filtered_size_motion);
         float center_alpha = std::clamp(config_.center_alpha_min +
             (config_.center_alpha_max - config_.center_alpha_min) * center_response, 0.0f, 1.0f);
+        float effective_size_alpha_max = config_.size_alpha_max;
+        if (config_.center_gated_size_filter) {
+            const float low_motion_max = std::clamp(config_.low_motion_size_alpha_max,
+                                                     config_.size_alpha_min,
+                                                     config_.size_alpha_max);
+            effective_size_alpha_max = low_motion_max +
+                (config_.size_alpha_max - low_motion_max) * center_response;
+        }
         const float size_alpha = std::clamp(config_.size_alpha_min +
-            (config_.size_alpha_max - config_.size_alpha_min) * size_response, 0.0f, 1.0f);
+            (effective_size_alpha_max - config_.size_alpha_min) * size_response, 0.0f, 1.0f);
         const float center_dx = mcx - lcx;
         const float center_dy = mcy - lcy;
         const float center_delta = std::hypot(center_dx, center_dy);
@@ -334,9 +590,12 @@ private:
         }
         if (center_alpha_out) *center_alpha_out = center_alpha;
         if (size_alpha_out) *size_alpha_out = size_alpha;
+        if (effective_size_alpha_max_out) *effective_size_alpha_max_out = effective_size_alpha_max;
 
-        const float cx = center_alpha * mcx + (1.0f - center_alpha) * pcx;
-        const float cy = center_alpha * mcy + (1.0f - center_alpha) * pcy;
+        const float predicted_cx = pcx + global_motion_dx;
+        const float predicted_cy = pcy + global_motion_dy;
+        const float cx = center_alpha * mcx + (1.0f - center_alpha) * predicted_cx;
+        const float cy = center_alpha * mcy + (1.0f - center_alpha) * predicted_cy;
         const float width = size_alpha * mw + (1.0f - size_alpha) * pw;
         const float height = size_alpha * mh + (1.0f - size_alpha) * ph;
         Detection out = measured;
@@ -381,7 +640,38 @@ private:
                   <<" innovation_confirmed="<<innovation_confirmed<<" pending_hits="<<t.pending_hits
                   <<"\n"<<std::flush;
     }
+    void log_motion_track(const Track& track, uint64_t frame_id, int64_t pts_ms, float dt_sec,
+                          const Detection& raw, bool deadzone, bool filter_reset,
+                          bool was_active) const {
+        if (!config_.motion_stats_logging) return;
+        std::ostringstream line;
+        line << std::setprecision(9)
+             << "[MotionTrack] frame=" << frame_id
+             << " pts_ms=" << pts_ms
+             << " id=" << track.id
+             << " class_id=" << raw.class_id
+             << " dt_ms=" << static_cast<int64_t>(std::llround(dt_sec * 1000.0f))
+             << " raw=" << raw.x1 << ',' << raw.y1 << ',' << raw.x2 << ',' << raw.y2
+             << " smooth=" << track.smooth.x1 << ',' << track.smooth.y1 << ','
+             << track.smooth.x2 << ',' << track.smooth.y2
+             << " deadzone=" << deadzone
+             << " reset=" << filter_reset
+             << " was_active=" << was_active
+             << " active=" << (track.state == TrackState::Active)
+             << " center_alpha=" << track.last_center_alpha
+             << " size_alpha=" << track.last_size_alpha;
+        line << " effective_size_alpha_max=" << track.last_effective_size_alpha_max;
+        line << " global_motion_used=" << track.last_global_motion_used
+             << " global_motion_dx=" << track.last_global_motion_dx
+             << " global_motion_dy=" << track.last_global_motion_dy;
+        std::cout << line.str() << '\n';
+    }
     mutable std::mutex mutex_; TrackerConfig config_; std::vector<Track> tracks_; std::vector<Detection> last_raw_; std::deque<Snapshot> snapshots_;
     uint64_t next_track_id_=1,last_detection_frame_id_=0; int64_t last_detection_pts_ms_=0; size_t last_matched_=0,last_created_=0,last_lost_=0;
     uint64_t total_reversal_damped_=0;
+    std::vector<MotionSample> previous_motion_samples_;
+    int64_t previous_motion_pts_ms_=0;
+    bool global_motion_valid_=false;
+    float filtered_global_motion_dx_=0.0f,filtered_global_motion_dy_=0.0f;
+    int64_t global_motion_pts_ms_=0;
 };
