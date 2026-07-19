@@ -301,6 +301,20 @@ def main():
             else:
                 status = "no_detection_unwritten"
 
+            # A browser annotator may save the same image while this batch is
+            # running. Preserve that human label unless overwrite was asked.
+            if label_path.exists() and not args.overwrite:
+                skipped_existing += 1
+                rows.append(
+                    {
+                        "image": image_path.name,
+                        "status": "skipped_saved_during_run",
+                        "detections": str(len(dets)),
+                        "labels": labels,
+                    }
+                )
+                continue
+
             if not args.dry_run and (lines or args.write_empty):
                 label_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
                 written += 1

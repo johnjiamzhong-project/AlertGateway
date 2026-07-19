@@ -48,7 +48,13 @@ def main():
     names = model.names
     print(f"model={args.model}")
     print(f"split={args.split} mAP50={result.box.map50 * 100:.2f}% mAP50-95={result.box.map * 100:.2f}%")
-    for class_id, ap50 in enumerate(result.box.ap50):
+    class_ids = (
+        result.box.ap_class_index
+        if hasattr(result.box, "ap_class_index")
+        else result.box.ap_class
+    )
+    for class_id, ap50 in zip(class_ids, result.box.ap50):
+        class_id = int(class_id)
         print(f"class={class_id} name={names[class_id]} AP50={ap50 * 100:.2f}%")
 
 

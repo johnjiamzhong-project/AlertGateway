@@ -1,6 +1,6 @@
 # AlertGateway 项目记忆
 
-最后更新：2026-07-16
+最后更新：2026-07-19
 
 ## 使用规则
 
@@ -29,9 +29,9 @@ V4L2摄像头采集
 
 ## 当前已确认状态
 
-- Git分支：`master`；HEAD 为当前本地提交（2026-07-17，尚未推送）。
-- 当前工作区有未提交的检测框运动诊断、分析工具、实验配置/报告和本记忆更新；不得直接清理或
-  用 Git 回退覆盖。生产视觉逻辑仍以 `f3970aa` 为基线，诊断开关默认关闭。
+- Git分支：`master`；HEAD 为本地提交 `b00d067`（2026-07-17，尚未推送）。
+- `b00d067` 已纳入检测框运动诊断、分析工具、实验配置/报告和对应记忆更新；生产视觉逻辑仍以
+  `f3970aa` 为基线，诊断开关默认关闭。后续工作区变更不得直接清理或用 Git 回退覆盖。
 - 本地已有ARM64构建产物 `build/AlertGateway`。
 - 仓库内 `model/` 只有 `.gitkeep`；实际运行所需的
   `model/yolov8s_rockchip_dfl.rknn` 未纳入Git。
@@ -1325,3 +1325,324 @@ The first automated 12/18 Mbps report was invalid because it used the old AlertG
   中低速单步位移 RMS 增加的风险一致；不要提高共同位移权重、放宽一致性阈值或继续在此分支调参。
   一致性门控代码和配置已从工作区移除。随后关闭共同位移的 size20 对照也被用户观察为晃动幅度
   偏大；当前只将此前已通过大幅往返摆动人工观察的方向反转阻尼作为回归对照，固定输出地址不变。
+
+## 2026-07-17 4K 识别准确率数据闭环（待执行）
+
+- 用户报告真实 4K 场景中 `cup`、`book`（含说明书）和 `laptop` 的识别率、检测框贴合度偏低。
+  当前决定先复用已有 4K 测试视频，以 1 FPS 抽帧、筛选和人工标注建立数据集，再按完整视频片段
+  划分 train/val/test，避免相邻帧跨集合造成评估泄漏。
+- 本轮保持既有六类别定义，说明书统一标为 `book`；若要把说明书作为独立类别，必须另行决定类别
+  契约并重新收集、训练和评估。
+- 微调在主机 WSL/Linux GPU 环境完成；只有浮点模型在独立 4K test 集逐类验证确有提升后，才从
+  train/val 中选取代表帧做 INT8 校准并生成 RKNN。校准不替代训练，不能直接提高识别率或修正框。
+- 执行指南：`docs/4k/4k_accuracy_finetune_and_int8_calibration.md`；已从
+  `docs/4k/README.md` 和仓库根 `readme.md` 建立入口。当前尚未开始抽帧、标注、训练或转换。
+
+### 抽帧完成（待筛选与标注）
+
+- 已从 `runs/input_videos/4k/` 的 5 段现有 3840×2160/30FPS 测试视频按 1 FPS 抽取候选帧，
+  原始帧保存在仓库外 `/home/rambos/datasets/alertgateway_4k_refine/raw/<video_id>/`，不得修改。
+  各视频帧数：`VID_20260712_131214` 83、`VID_20260712_131410` 67、
+  `VID_20260712_131553` 63、`VID_20260716_112619` 31、`VID_20260716_112700` 30；合计 274 张，
+  约 162 MB。
+- 下一步：人工筛除重复/模糊帧，将保留帧复制到
+  `/home/rambos/datasets/alertgateway_4k_refine/annotation/images/`，创建六类 `classes.txt` 后用
+  `tools/dataset/run_yolo_annotator.py --annotation-dir .../annotation` 标注；尚未创建训练集、未训练、
+  未做 INT8 校准。
+- 标注工作区已初始化于 `/home/rambos/datasets/alertgateway_4k_refine/annotation/`：`classes.txt`
+  固定为现有六类顺序，`images/` 已从 `raw/` 创建 274 张硬链接，`labels/` 当前为空。标注器中删除
+  或移动 `annotation/images/` 的图片不会修改 `raw/` 原始帧；下一步由用户在浏览器筛选/标注。
+- 已增强 `tools/dataset/run_yolo_annotator.py` 的 4K 标注交互：选中框后可拖框内整体移动，拖黄色
+  控制点调整四角/四边，并有放大、缩小、适应窗口按钮；Python/前端 JavaScript 语法检查和针对该
+  工作区的短时服务启动检查通过。尚未产生人工标签。
+- 已用现有 `/home/rambos/yolov8_models/onnx/yolov8s_official.onnx` 通过
+  `tools/dataset/pseudo_label_desktop6.py` 对 274 张 4K 标注候选帧做预标注（ONNX Runtime，
+  置信度阈值 0.30，未覆盖人工标签）。输出位于 `annotation/labels/` 和
+  `annotation/pseudo_label_manifest.csv`：206 张有候选标签、68 张无标签文件（不等同负样本，
+  必须人工判断）；候选框数为手机 28、杯子 17、键盘 117、鼠标 122、笔记本 99、书本 73。
+  `tvmonitor` 的已有映射会归入 `laptop`，所以笔记本候选必须人工核对。下一步优先核对 cup/book/
+  laptop 和无候选帧，修正/补框后保存为人工标签。
+- 用户决定本轮只标注项目最常用的 4K 回放源 `VID_20260712_131410.mp4`。活动标注目录
+  `annotation/images/` 已仅保留其 67 张（`00001`--`00067`），因此重启标注器后列表从 1 到 67；
+  其中 60 张已有预标注。其他 204 张当前候选图片和 146 个预标注标签已移动到可恢复的
+  `annotation/excluded/images|labels/`，未修改 `raw/` 原始帧，也未碰触 `annotation/deleted/`。
+- 用户已完成该 67 张的人工核对/标注。只读校验结果：67 张图片与 67 个标签一一对应、无空标签、
+  无非法 YOLO 行或坐标范围错误；共 310 个框（手机 27、杯子 52、键盘 48、鼠标 52、笔记本 30、
+  书本 101）。这批数据可作为 4K 微调训练来源，但因全部来自同一连续视频，不能同时作为独立
+  test 集；下一步必须从另一整段视频建立独立测试集，或补充更多不同场景的视频后再按视频划分。
+- 在用户暂停继续标注后，已对这 67 张运行当前官方 ONNX 基线（`yolov8s_official.onnx`、
+  置信度 0.30、NMS IoU 0.45），预测写入隔离目录
+  `/home/rambos/datasets/alertgateway_4k_refine/baseline_predictions_131410/`，未改动人工标签。
+  新增 `tools/dataset/evaluate_yolo_label_pairs.py`，在固定 IoU=0.50 下与人工标签比较：总体
+  Precision 91.67%、Recall 42.58%、F1 58.15%、匹配框平均 IoU 98.68%。逐类 Recall：手机 3.70%、
+  杯子 13.46%、键盘 50.00%、鼠标 30.77%、笔记本 86.67%、书本 57.43%。这只是同源训练候选的
+  微调前诊断，不是独立 test 结果；结论是模型当前主要问题为漏检，微调应优先强化 cup/book（以及
+  样本足够时的手机/鼠标），笔记本在该序列的定位/召回并不低。
+- 已建立隔离候选数据集 `/home/rambos/datasets/alertgateway_4k_refine/candidate_train_20260717/`：
+  同一视频前 54 张为 train、后 13 张为临时 val，全部为硬链接且不改动标注。GTX 1650 SUPER
+  4GB 上使用 Ultralytics 8.4.67、YOLOv8s 初始权重、640、batch=4、AMP 关闭完成 5 epoch
+  smoke 与 30 epoch 候选训练；产物为
+  `/home/rambos/datasets/alertgateway_4k_refine/runs/yolov8s_4k_refine_30e/weights/best.pt`，
+  最佳 epoch=25，临时 val Precision/Recall/mAP50/mAP50-95 为 90.86%/78.83%/84.45%/72.49%。
+  最佳权重单独复评 val 得 83.80%/72.93%，逐类 AP50：手机 82.55%、杯子 86.50%、键盘 78.09%、
+  鼠标 91.09%、笔记本 74.22%、书本 90.36%。权重加载正常，未导出 ONNX/RKNN、未上板部署。
+  该 val 与 train 同源且连续，数值只作训练链路/候选趋势，不得作为精度验收或生产切换依据；下一步
+  必须完成 `test_annotation/` 的另一段 63 张标注并作独立评估。
+- 已建立独立测试标注工作区 `/home/rambos/datasets/alertgateway_4k_refine/test_annotation/`，只包含
+  不参与训练的 `VID_20260712_131553.mp4` 的 63 张帧；图片是从 `raw/` 建立的硬链接，58 个已有
+  预标注标签是从 `annotation/excluded/labels/` 复制而来，编辑不会影响原候选。剩余无预标注帧为
+  `00014`、`00017`、`00032`、`00034`、`00036`。下一步由用户人工核对这 63 张并保存，之后再
+  核验标签并创建正式 train/test 目录；当前尚未训练或转换。
+- 用户已完成该独立测试集 63 张的人工标注：63 图/63 标签、242 个框，格式和坐标校验通过（手机 29、
+  杯子 28、键盘 45、鼠标 36、笔记本 37、书本 67）。候选权重在此从未参与训练的测试集标准结果为
+  Precision 82.9%、Recall 65.4%、mAP50 72.96%、mAP50-95 61.66%；AP50：手机 21.07%、杯子
+  86.72%、键盘 70.06%、鼠标 98.54%、笔记本 82.56%、书本 78.81%。
+- 固定 `conf=0.30`、NMS IoU=0.45、匹配 IoU=0.50 的对比中，当前 ONNX 基线 → 候选：总体 Recall
+  42.98% → 65.29%，杯子 3.57% → 85.71%，书本 11.94% → 67.16%，鼠标 72.22% → 97.22%；手机
+  34.48% → 17.24%、键盘 57.78% → 46.67%、笔记本 89.19% → 75.68%，总体 Precision 92.86% →
+  81.03%。候选改善 cup/book 漏检但存在手机、键盘、笔记本回退，**不得导出 ONNX/RKNN 或上板部署**。
+  下一步应仅从第三段、未作为该 test 的视频补充训练样本，重点补手机/键盘/笔记本的差异场景，然后
+  与既有 67 张训练标签合并微调；63 张独立 test 必须保持冻结用于复验。
+- 新增 `tools/dataset/export_yolo_predictions.py` 以原始图片 stem 导出微调模型预测并与 GT 配对；
+  首版发现 Ultralytics 对列表输入会给 `result.path` 临时命名 `image0` 等，已修复为按输入路径命名。
+  错误命名的隔离预测保留在
+  `candidate_predictions_131553/invalid_export_labels/`，正确预测位于同目录 `labels/`，人工标签未改动。
+- 为下一轮训练补样建立 `/home/rambos/datasets/alertgateway_4k_refine/supplement_annotation/`，来源为
+  未用作独立 test 的 `VID_20260712_131214.mp4`：83 张 `raw/` 硬链接，75 个已有预标注标签复制，
+  无候选帧为 `00045`--`00048`、`00076`--`00079`。该工作区只用于补充训练，不得与冻结的
+  `test_annotation/` 混用；用户应优先核对手机、键盘、笔记本，保留有姿态/距离/遮挡差异的帧并删除
+  连续重复帧，后续再与既有 67 张训练标注和历史桌面六类训练集混合。
+- 用户已完成补充集 83 张标注核验：83 图/83 标签、1 空标签、无格式错误；实例数为手机 55、杯子 47、
+  键盘 59、鼠标 61、笔记本 37、书本 0。第二轮混合训练集为历史六类 train 372 + 首轮 4K 67 + 补充
+  4K 前 73 = 512 张，临时 val 为历史 val 30 + 补充末 10 = 40 张，已确认冻结的 63 张 test 没有混入。
+  YOLOv8s/640/batch4/AMP关闭训练 20 epoch，候选位于
+  `runs/yolov8s_4k_mixed_20e/weights/best.pt`，未导出/部署。
+- 第二轮在冻结 test 的标准 mAP50/mAP50-95 为 69.83%/61.71%，AP50：手机 44.98%、杯子 63.81%、
+  键盘 91.79%、鼠标 96.97%、笔记本 80.70%、书本 40.71%。固定阈值 Recall：17.24%、57.14%、
+  77.78%、97.22%、70.27%、16.42%，总体 52.89%。相对首轮 4K-only 候选，手机/键盘改善而
+  cup/book 回退，历史训练样本等权混入稀释 4K 特征；两轮均拒绝转换/部署。下一步应锁定 63 test，
+  用独立 val 而非 test 选择 4K 重复/加权与历史样本比例，兼顾两组类别。
+
+## 2026-07-17 4K 来源加权重训结论（当前最佳未部署）
+
+- 原 63 张 `VID_20260712_131553` 虽从未进入训练，但已用于比较多轮候选并改变方案，现正式降级为
+  4K dev，不再视为一次性 final test；部署前必须从未使用的新视频建立 final test。
+- 新增 `tools/dataset/prepare_4k_weighted_refine.py`：生成历史 train 372 张一份 + 两段 4K 共
+  150 张各三份的硬链接训练集，总计 822 张（4K 54.7%），组合 dev 为 4K 63 + 历史 29 共 92 张；
+  训练/验证唯一图像哈希重叠为 0，来源记录在 `manifest.csv`。
+- 新增 `tools/dataset/train_4k_weighted_refine.py`，支持显式学习率和冻结层。历史六类权重初始化的
+  2 epoch/25 epoch 候选以及 4K 权重初始化的全量 2 epoch 候选均未同时满足目标；组合 fitness 会
+  掩盖域偏移，后续必须分别评估 4K dev 与历史回归域。
+- 当前 4K 最佳：从首轮 4K-only best.pt 初始化，冻结前 10 个 backbone 模块，仅训练颈/头 2 epoch，
+  AdamW `lr0=0.0005`、640、batch4、AMP 关闭。权重位于
+  `/home/rambos/datasets/alertgateway_4k_refine/runs/yolov8s_4k_first_head_weighted_2e_20260717/weights/best.pt`。
+- 4K dev mAP50/mAP50-95 为 79.91%/70.95%，AP50 为手机 50.52、杯 85.56、键盘 86.09、鼠标
+  99.39、笔记本 81.93、书 75.98。固定 conf0.30/NMS0.45/匹配 IoU0.50 的总体 P/R/F1 为
+  86.21%/72.31%/78.65%，逐类 Recall 41.38/78.57/86.67/100/78.38/55.22%，匹配框平均 IoU 92.68%。
+- 历史 29 张回归域 mAP50/mAP50-95 仅 65.26%/53.03%，低于历史基线 77.18%，主要是历史 mouse/
+  laptop 回退。因此当前权重只允许作为 4K 浮点测试候选，不导出 ONNX/RKNN、不上板、不替换生产。
+- 下一步：停止继续使用 63 张 dev 调参；建立全新 final test。若要求一个模型同时覆盖历史/V4L2 与
+  4K，需先补历史 mouse/laptop 和新 4K laptop 数据，并把历史回归 mAP50 恢复到至少 72.18%。
+
+## 2026-07-17 板端候选模型真实推流验证
+
+- 用户明确要求查看“视频推到板子、板端推理后再传出”的结果；为此建立临时配置
+  `config/config_4k_candidate_20260717.json`，模型路径为板端独立文件
+  `model/yolov8s_rockchip_dfl_candidate_20260717.rknn`，未覆盖生产模型。
+- 当前最佳权重已导出为九输出 Rockchip ONNX，并用 32 张 640 校准图生成 INT8 RKNN；转换日志确认
+  所有层均为 INT8、无 float/fp16 fallback。该 32 张校准模型仅作本次冒烟观看，不代表最终量化验收。
+- 板子 `192.168.0.200` 从 `~/AlertGateway` 启动候选配置成功：RKNN API 2.3.0、`outputs=9`、
+  NPU 约 26--28 ms，持续输出 `objs:1--3`；输入为 `VID_20260712_131553.mp4` 经
+  `rtmp://192.168.0.168/live/testsrc2`，输出固定为 `rtmp://192.168.0.168/live/alertgateway`。
+- SRS 重启后 API 确认输入和输出均为活跃 3840x2160 H.264；本次只验证真实链路和画面观看，候选仍
+  不得替换生产，也未执行 git commit。
+
+## 2026-07-18 4K 直接照片标注工作区
+
+- 用户采集的 4K JPG 位于 WSL 映射路径 `/mnt/g/source/vscode/AlertGateway/`，按六类目录组织：
+  `cell phone` 62、`cup` 58、`keyboard` 59、`mouse` 77、`laptop` 75、`book` 77，共 408 张。
+- 原始 JPEG 的编码像素均为 3840x2160，但 EXIF 方向混合；按方向旋正后得到横向 16:9 共 240 张
+  （3840x2160）和纵向 9:16 共 168 张（2160x3840）。SHA-256 无完全重复文件，原始 Windows 目录
+  未移动或修改。
+- 已新增 `tools/dataset/prepare_4k_photo_annotation.py`，并将图片复制到独立工作区
+  `/home/rambos/datasets/alertgateway_4k_photo_20260718/annotation/`。工作区包含 408 张图片、六类
+  `classes.txt`、`photo_manifest.csv`，`labels/` 当前为空；原始目录提示类不等同于最终标签，标注时
+  必须记录画面中所有可见目标。
+- 已新增 `tools/dataset/normalize_4k_photo_images.py`，生成去 EXIF、质量 95 的预处理工作区
+  `/home/rambos/datasets/alertgateway_4k_photo_20260718/preprocessed/landscape_16x9/` 和
+  `preprocessed/portrait_9x16/`；主 16:9 测试应使用前者，纵向图片只作可选补充，不强行裁剪。
+- 已新增 `tools/dataset/prepare_4k_letterbox_inputs.py`：它会按 `InferThread.cpp` CPU 兜底的实际
+  最近邻缩放和 BGR(114) 居中补边，生成无损 640x640 PNG 模型输入预览及坐标映射清单；不替代原生
+  4K 标注图。已为横向 240 张实际生成
+  `/home/rambos/datasets/alertgateway_4k_photo_20260718/model_input_640_letterbox/`：每张为 640x640
+  PNG，有效内容 640x360、上下各 140px 灰边，`letterbox_manifest.csv` 记录原图到模型坐标的 1/6
+  缩放与 padding。
+- 用户要求把预处理照片全部加入可编辑工作区。已新增
+  `tools/dataset/prepare_4k_preprocessed_annotation.py`，在
+  `/home/rambos/datasets/alertgateway_4k_photo_20260718/annotation_preprocessed/` 创建统一标注目录：横向
+  240 + 纵向 168 = 408 张，`images/` 均为到预处理 JPG 的硬链接，未复制、移动或修改图片，`labels/`
+  初始为空。
+- 已启动并从 Windows 侧确认本机标注服务：`http://127.0.0.1:8765/`，当前目标为
+  `annotation_preprocessed/`，API 返回 408 张图片和六类固定类别。标注仅在用户点击保存或明确标为空负
+  样本后写入该目录的 `labels/`；不要标注 640x640 PNG 预览。照片用于静态检测精度评估，正式通过后仍需
+  用短视频完成板端时序和推流验收。当前照片主要来自同一室内环境，暂不宣称覆盖多背景泛化。
+- 标注器原先在未选中已有框时点击类别按钮只会设置“下一新框”的默认类别，保存后不会修改旧框，容易误以为
+  类别改动丢失。现已调整为：单框图片点击类别会自动选中并修改该框；多框图片未选中时会明确提示先选框，
+  不再静默保存。
+- 用户要求先由模型识别给出草稿。新增 `tools/dataset/prelabel_missing_yolo.py`，仅给没有标签文件的图片
+  写入当前 4K 浮点候选的草稿，并在写入前二次检查，避免覆盖网页中并发保存的人工标签。实际运行后统一
+  工作区已有 408/408 标签文件，共 440 框（手机 63、杯子 59、键盘 82、鼠标 80、笔记本 71、书本 85）和
+  63 个空标签；这些包含模型草稿与人工标签，仍必须人工复核，空标签尤其不能直接视为已确认负样本。
+- 已同步增强 `tools/dataset/pseudo_label_desktop6.py` 的并发保护；其官方 ONNX 备用预标注路径随后检查到
+  408 张均已有标签而全部跳过，未覆盖任何标签。
+- 用户已完成 408 张预处理照片的人工复核/标注。最终只读验收：408 图片与 408 标签一一对应，无缺失或
+  孤儿标签；494 个框、0 空标签、YOLO 行格式/类别/正面积/坐标边界检查均为 0 错误（贴边坐标按 1e-5
+  四舍五入容差校验）。类别框数为手机 63、杯子 58、键盘 60、鼠标 80、笔记本 78、书本 155，最大最小
+  比 2.67 倍；同类 IoU≥0.95 的重复框为 0。六类带框抽样及近景大键盘框目检合理，叠放书本已分别标框。
+  标注验收通过。随后按文件名拍摄时间复核发现：六个原始文件夹基本各是一段单类别连续连拍（手机 62 张
+  仅手机框、杯子 58 张仅杯子框、键盘 59、鼠标 77、笔记本 75、书本 77）；按单张抽约 60 张 val 会把
+  相邻同姿态连拍泄漏到 train，按整段留 val 又会让 train 缺失对应主类。因此不得从这 408 张建立可信的
+  六类 val；它们可全部作为训练候选。下一步须另拍至少一段独立的六类验证照片（建议每类约 10 张、每张
+  改变距离/角度/遮挡），完整人工复核后冻结为 val；部署前 final test 仍需另一批未参与调参的新场景照片。
+- 用户已在 Windows 源目录下新增独立验证照片 `/mnt/g/source/vscode/AlertGateway/test/`，共 82 张：手机
+  13、杯子 11、键盘 10、鼠标 11、笔记本 18、书本 19。SHA-256 与先前 408 张训练来源的精确重复为 0。
+  已按同一规则生成去 EXIF、质量 95 的
+  `/home/rambos/datasets/alertgateway_4k_photo_20260718/validation_preprocessed/`（横向 60、纵向 22），
+  并建立硬链接标注工作区 `validation_annotation/`，82 图、labels 初始为空。
+- 独立验证标注服务已启动并从 Windows 侧验证为 `http://127.0.0.1:8766/`；训练照片标注服务仍为 8765，
+  两者标签目录隔离。下一步用户需人工复核这 82 张验证标签；完成后先验收并冻结为 val，当前 408 张才可
+  物化为 train。最终部署 test 仍需另一批未参与训练或本轮选择的新场景照片。
+- 已按用户要求使用当前 4K 浮点候选权重为验证集生成草稿标签（conf=0.30、NMS=0.45、640），结果在
+  `validation_annotation/labels/` 和 `pseudo_label_manifest_4k_photos.csv`：82 份标签、122 个候选框，
+  类别为手机 7、杯子 11、键盘 13、鼠标 10、笔记本 22、书本 59；其中 6 张模型无检出而写为空草稿，
+  不等同于负样本。用户必须在 8766 逐张复核、改错类/框、补漏框；人工完成后再做标签验收和冻结。
+- 用户已完成独立验证集人工复核。只读验收结果：82 图/82 标签、103 框、0 空标签、0 格式/坐标错误，
+  类别为手机 13、杯子 11、键盘 10、鼠标 12、笔记本 18、书本 39；同类 IoU≥0.95 重复框为 0，六类带框
+  抽样目检合理。验证集验收通过。
+- 已新增并运行 `tools/dataset/materialize_4k_photo_train_val.py`，生成冻结数据集
+  `/home/rambos/datasets/alertgateway_4k_photo_20260718/train_val_frozen/`：train=408 图/494 框，val=82 图/
+  103 框，图像以硬链接加入、标签复制以冻结内容，SHA-256 图像跨集合重叠为 0，`data.yaml` 已写入六类
+  定义。下一步可用该 data.yaml 做新的 4K 微调；val 只用于候选选择，不得并入训练。最终部署 test 仍需
+  另一批未参与训练或本轮选择的新场景照片。
+- 首个新照片候选从原 4K 最佳权重继续训练，策略为冻结前 10 个 backbone 模块、AdamW、lr0=0.0005、
+  batch4、640、AMP关闭；运行时限在 epoch 18/20 后终止，但 `best.pt` 已完整写入，不能记为完整 20 epoch
+  训练。冻结新 val 的独立复评为 mAP50=90.47%、mAP50-95=70.58%，AP50：手机 88.13、杯子 99.50、
+  键盘 94.76、鼠标 74.33、笔记本 97.80、书本 88.31。
+- 同一 `best.pt` 在历史 29 张回归集仅 mAP50=48.92%、mAP50-95=36.39%，低于至少 72.18% 的通用模型
+  门禁；AP50 为手机 84.91、杯子 77.71、键盘 9.20、鼠标 2.39、笔记本 21.03、书本 98.27。结论：该权重
+  仅可作为 4K 照片域浮点候选，严禁 ONNX/RKNN 导出、上板或替换通用生产模型。若要一个通用模型，下一轮
+  训练必须重新混合历史 train，并用当前新 val 选模型、历史回归单独门禁；若接受 4K 专用模型，仍先需另拍
+  未使用 final test 后才可进入转换验证。
+- 用户已决定不再追求单一通用模型，采用双模型按来源切换：现有生产模型继续服务 V4L2/旧桌面域，新的
+  4K 专用权重仅服务 4K 拉流配置。两者在单一 AlertGateway 进程中按配置二选一加载，故不会在运行时同时
+  占用两份 NPU 模型内存；代价是额外约一份 RKNN 文件的磁盘空间、两套模型/校准/回归测试维护，以及切换
+  来源时需重启到对应配置。4K 专用候选仍必须先用全新 final test 通过浮点评估，之后才允许导出 ONNX/RKNN
+  并在独立 4K 配置中板端验证，绝不覆盖 V4L2 模型。
+- 用户新增的绿白键帽照片位于 `/mnt/g/source/vscode/AlertGateway/test/keyboard2/`，共 13 张 3840x2160
+  JPEG；与现有 408 张训练照片和 82 张验证照片的 SHA-256 精确重复均为 0。已用
+  `tools/dataset/prepare_4k_keyboard_challenge.py` 按 EXIF 方向、JPEG 质量 95 创建独立挑战集
+  `/home/rambos/datasets/alertgateway_4k_photo_20260718/final_test_keyboard_challenge/`：13 张图片、空
+  `labels/`、六类定义、清单和仅作评估用的 `data.yaml`。该集绝不并入 train/val；人工标注后只对已冻结的
+  4K 候选执行一次键盘泛化评估，不据此继续调参。它只验证 keyboard 的绿白键帽泛化，不能替代最终六类
+  final test。标注服务已从 Windows 侧启动并验证：`http://127.0.0.1:8767/`，API 返回 13 张未标注图片；
+  8765 和 8766 不受影响。
+- 用户已完成该挑战集标注。验收结果为 13 图/13 标签/13 个框，全部为 keyboard，图片与标签一一对应，
+  YOLO 类别、字段数和归一化几何检查均为 0 错误；带框联系表抽检确认 13 张的键盘主体均被合理覆盖。使用
+  冻结的 4K 候选 `yolov8s_4k_photos_head_20e_20260718/weights/best.pt` 执行有效的只读评估（640、GPU、
+  batch 1、workers 0）：键盘 mAP50=71.33%、mAP50-95=48.95%、Precision=88.5%、Recall=61.5%。这证明
+  绿白键帽并非完全失效，但漏检仍较多，不能仅凭此键盘单类挑战集批准导出或部署；仍需独立、未参与选择的
+  六类 final test。评估脚本此前把 `ap50` 的压缩数组错误按 0 起始类别显示，已改为根据 `ap_class` 显示，
+  因此本次唯一 AP50 正确归属 keyboard（类别 2）。
+- 当前阶段决定：暂停任何进一步训练、微调、ONNX/RKNN 导出和板端部署。下一步仅采集并人工标注一套新的
+  六类 4K final test，建议每类 10--15 张、总计 60--90 张；必须与 408 张 train、82 张 val 和已评估的
+  `test/keyboard2` 均不重叠，且应改变背景、距离、角度、光线或遮挡。建议 Windows 源目录为
+  `G:\source\vscode\AlertGateway\final_test\`，下设六个类别文件夹。该集不得预标注、不得参与训练或
+  候选选择；人工标注验收后只对当前冻结的 4K 浮点候选做一次全六类最终评估。只有该评估达标后，才恢复
+  ONNX 导出、4K INT8 校准/RKNN 转换、ONNX/RKNN 精度对比，以及使用独立 4K 配置的板端推流/稳定性验证；
+  期间绝不替换现有 V4L2 生产模型。
+- 2026-07-19 已核实上述 Windows 来源目录在 WSL 中映射为
+  `/mnt/g/source/vscode/AlertGateway/final_test/`：共 166 张 JPG，分类目录数量为手机 29、杯子 26、
+  键盘 32、鼠标 28、笔记本 25、书本 26。该批数据现指定为 4K 六类 final test 候选；后续仅可建立
+  隔离标注工作区并人工标注、验收和对当前冻结候选进行一次只读最终评估，严禁预标注、并入 train/val
+  或用于任何候选选择。
+- 已为 final test 建立 EXIF 旋正、JPEG 质量 95 的隔离副本
+  `/home/rambos/datasets/alertgateway_4k_photo_20260718/final_test_preprocessed_20260719/`（横向 150、
+  纵向 16），以及仅含硬链接图片和独立 labels 的标注工作区
+  `/home/rambos/datasets/alertgateway_4k_photo_20260718/final_test_annotation_20260719/`。标注服务已启动并
+  验证为 `http://127.0.0.1:8768/`，返回六类和 166 张待标图片；该集绝不使用模型预标注。
+- 用户已完成 final test 人工标注。只读验收：166 图/166 标签、221 个框、0 个空标签、0 个格式/类别/坐标
+  错误；类别框数为手机 58、杯子 26、键盘 32、鼠标 28、笔记本 25、书本 52。与 4K train、val 和
+  keyboard challenge 的源 JPEG SHA-256 精确重叠均为 0。该集已冻结，严禁再用于训练、候选选择或调参。
+- 已对冻结的 4K 浮点候选
+  `runs/yolov8s_4k_photos_head_20e_20260718/weights/best.pt` 执行 final test 评估（640、GPU、batch 1、
+  workers 0）：Precision 89.6%、Recall 82.3%、mAP50 92.22%、mAP50-95 61.68%；AP50 为手机 81.33%、
+  杯子 88.33%、键盘 94.65%、鼠标 92.74%、笔记本 98.74%、书本 97.51%。结果达到进入 4K 专用模型
+  ONNX 导出、INT8 校准/RKNN 转换及 ONNX/RKNN 精度对比阶段的条件；仍绝不替换 V4L2 生产模型。
+- 已从该候选导出九输出 Rockchip ONNX
+  `/home/rambos/yolov8_models/onnx/yolov8s_4k_photos_head_20e_20260718_finaltest_native_640.onnx`，并仅从
+  冻结训练集选择 150 张生成校准集
+  `calibration_640_finaltest_20260719/`。INT8 RKNN 已输出为
+  `/home/rambos/yolov8_models/rknn/yolov8s_4k_photos_head_20e_20260718_finaltest_int8.rknn`（约 12 MB）；
+  转换日志确认所有层为 INT8、无 float/fp16 fallback。
+- 使用同一 final test、Rockchip DFL 后处理、letterbox、conf=0.25、NMS=0.45、匹配 IoU=0.50 的量化
+  对比：ONNX mAP@0.5=87.73%，RKNN Simulator INT8=87.79%（+0.06 个百分点）。逐类 AP50 ONNX→RKNN：
+  手机 66.54→66.40、杯子 88.90→84.48、键盘 92.67→92.35、鼠标 84.48→85.14、笔记本 95.84→99.54、
+  书本 97.97→98.85；没有不可接受的量化回退。该 4K 专用候选现允许进入隔离板端推流/稳定性/延迟验证，
+  但严禁覆盖 V4L2 生产模型、配置或输出以外的正式资源。
+- 2026-07-19 已将候选 RKNN 上传到 `firefly@192.168.0.201` 的独立文件
+  `~/AlertGateway/model/yolov8s_4k_photos_head_20e_20260718_finaltest_int8.rknn`，SHA-256 与主机一致；
+  独立配置为 `~/AlertGateway/config/config_4k_candidate_20260719.json`，使用既有 4K `testsrc2` 输入和固定
+  输出 `rtmp://192.168.0.168/live/alertgateway`，未覆盖生产文件。首次启动在 StreamThread 连接输出 RTMP 时
+  失败：`192.168.0.168:1935` 返回 Connection refused；MQTT 已连接，程序已读取 active 4K 配置，但未进入
+  拉流/NPU 推理。主机对 SRS API `:1985` 也未获得流状态。下一步仅需恢复 SRS 的 RTMP 服务后重跑相同 120 秒
+  隔离候选 smoke，再检查推流、推理耗时和稳定性；不得改用其他输出地址。
+- 板端隔离部署契约已固化为仓库配置 `config/config_4k_candidate_20260719.json`：201 板使用独立候选 RKNN、
+  复用 `config_4k_18mbps.json` 的 4K 输入，输出固定为 `rtmp://192.168.0.168/live/alertgateway`，不修改
+  `config/config.json` 的 V4L2 生产模型入口。SRS 启动失败的根因已在 Windows 只读检查中确认：TCP 保留端口范围
+  为 7998--8097，覆盖 SRS HTTP 的 8080；WSL/Linux SRS 因此在 bind(8080) 返回 EACCES。板端测试仅作为
+  RTMP client 连接 1935，不会也不能造成该服务器端 bind 权限错误。SRS 应关闭不需要的 `http_server`，或改为
+  保留范围外的端口后再配置开机自启。
+- SRS 实际安装在 Windows `D:\Tool\SRS 5.0\SRS`。2026-07-19 已确认报错实例加载的是
+  `conf\console.conf`（不是 `srs-live.bat` 使用的 `live.conf`）；此前其中 HTTP server 监听 8080，恰好落入
+  Windows TCP 保留范围 7998--8097。已备份为 `console.conf.bak.20260719_1400` 并将该 HTTP server 关闭，
+  保留 RTMP 1935、HTTP API 1985 和 RTC UDP 8000。手动启动后 `srs.exe` 保持运行，1935/1985 均确认监听，
+  日志无 8080 bind 失败。计划任务创建因当前权限被拒绝，已改用用户 Startup 文件夹中的
+  `SRS AutoStart.cmd`；脚本先切换到安装目录再运行 `objs\srs.exe -c conf\console.conf`，会在该 Windows 用户
+  每次登录后自动启动。若需要无人登录即启动，应以管理员权限将同一脚本注册为 AtStartup 计划任务。
+- SRS 修复后已完成 4K 专用候选的隔离板端验收：使用主机临时循环发布
+  `VID_20260712_131553.mp4` 至输入 `rtmp://192.168.0.168/live/testsrc2`，201 板以
+  `config_4k_candidate_20260719.json` 运行 120 秒后由 SIGTERM 正常退出（Done）。候选 RKNN 成功加载为
+  9 输出/zero-copy；检测持续为 3--6 个目标，NPU 通常 26--28 ms（单次 40 ms 尖峰），总推理通常约
+  36--45 ms。4K 编码/输出稳定约 30 FPS、约 18 Mbps，`put_fail=0`、`out_drop=0`、`write_fail=0`、
+  `queue=0`；SRS 记录 `/live/alertgateway` 累计接收 3393 帧、约 18 Mbps。候选已通过 float、INT8、
+  4K 推流和 120 秒稳定性验收，但仍仅限独立 4K 拉流配置，不覆盖 V4L2 生产模型。
+- 用户指定后续板端通信统一使用 `192.168.0.200`（替代此前候选验证所用的 .201）。已核对 .200 上的候选
+  RKNN SHA-256 与主机一致，且已有相同的 `config_4k_candidate_20260719.json`。当前为人工观看，正在将
+  `VID_20260712_131214.mp4` 循环发布到 `/live/testsrc2`，.200 板候选输出固定为
+  `rtmp://192.168.0.168/live/alertgateway`；SRS 确认结果流为活跃 H.264 Main 3840x2160。
+- 用户在该人工观看中报告：整体识别稳定性有所提升，但曾出现一次将黑色桌角误检为 `laptop`。这属于
+  4K 专用候选的真实场景 hard negative（背景/桌面局部）误检观察，尚未取得对应帧和置信度，不能据此调整
+  阈值或重新训练。后续应从该视频定位并保存误检帧，作为只含背景的空标签 hard negative 加入下一轮训练集；
+  final test 仍保持冻结，不能用于这项补强。
+- 针对观看端没有时间显示、用户无法手工定位误检帧的问题，已确定后续采用非侵入式“误检留证”方案：
+  临时测试配置启用 MQTT 检测缩略图，主机按消息中的 `laptop` 标签自动保存缩略图及接收时间，并与同次保存的
+  原始输入/结果流片段按同一启动时间轴关联；由开发侧筛选黑桌角误检并导出全分辨率原图。该流程不依赖用户
+  报时、不修改生产/V4L2 配置，也不改动已冻结 final test；确认样本后才作为空标签 hard negative 进入下一轮
+  4K 训练集。
+- 用户要求再次观看保留的 `VID_20260712_131214.mp4`。本次发现 SRS 进程存在但 1935/1985 未监听，已按已修复
+  `console.conf` 重启 SRS；随后主机重新发布到 `rtmp://192.168.0.168/live/testsrc2`，`.200` 候选配置成功
+  拉流并推回固定结果地址 `rtmp://192.168.0.168/live/alertgateway`。SRS API 已确认输入/输出均为活跃
+  3840×2160 H.264，板端日志显示 NPU 约 26--30 ms、单帧总推理约 36--44 ms；本次观看测试最多保留 600 秒。
+- 已根据本文件中已验证的 4K 数据、量化、SRS 修复和 `.200` 板端验收事实，新增知乎风格技术复盘
+  `docs/4k/4k_specialized_model_final_acceptance_20260719.md`。文章按“发现问题→分析原因→设计方案→解释原理
+  →实施验证→展示结果→复盘不足”组织，明确区分 train/val/challenge/final test，且不把不同数据集的分数
+  伪装成直接前后对比。
+- 2026-07-19 用户在 4K 专用模型实流观看中确认：识别/画框准确率提高，但目标移动时卡顿感比此前更明显。核对仓库与 192.168.0.200 板端实际 `config_4k_candidate_20260719.json` 后确认，新候选通过 `active_config=config_4k_18mbps.json` 继承基础链路，仍使用代码默认的自适应跟踪参数，但没有继承上次人工观看候选的 `track_center_gated_size_filter=true` 与 `track_global_motion_center_filter=true`，因此此前卡顿/抖动优化只保留了基础部分，并非完整保留。板端日志同时显示输出约 30 FPS、推理总耗时约 38～44 ms，未见编码或推流掉帧证据；当前更可能是约 24～26 FPS 的检测更新节拍叠加框平滑策略回退造成的框运动阶梯感。下一步应只在专用模型候选配置中补回已验收的跟踪参数，保持模型、阈值和固定输出地址不变，再用同一视频做人工 A/B。
+- 已将上一版 4K 实流观看候选的完整 30 项 `track_*` 参数适配进新专用模型配置 `config/config_4k_candidate_20260719.json`，逐字段比较确认缺失 0、变化 0；其中低速尺寸门控与全局运动中心滤波均显式启用。新 RKNN 路径、`conf_threshold=0.25`、六类范围、18 Mbps 基础配置和固定输出地址保持不变。配置已同步到 192.168.0.200，使用同一 `VID_20260712_131214.mp4` 启动 600 秒观看验证；SRS 已确认 `/live/testsrc2` 与 `/live/alertgateway` 均为 active 3840×2160 H.264，板端 NPU 约 25.5～29.3 ms、总推理约 35.7～45.1 ms。客观链路正常，最终移动流畅度仍需用户观看确认。
+- 用户随后报告推理结果流播放持续严重卡顿。诊断确认板端 18 Mbps 运行时仍为约 29.96 FPS，编码/输出无丢帧、失败或队列积压，但 SRS 一度仅能向播放器发送约 8.5 Mbps，低于约 17.6～18 Mbps 的结果流生成速率，卡顿属于播放传输吞吐不足，不是跟踪计算造成。入口配置中的 `stream.bitrate_kbps=8000` 首次尝试因程序合并语义（`active_config` 选中配置覆盖入口配置）未生效，已纠正为新增隔离基础配置 `config/config_4k_8mbps.json`，并让专用候选选择该配置；共享的 18 Mbps 配置、生产配置和代码均未修改。192.168.0.200 实测 MPP 目标 8 Mbps，稳定窗口输入约 30.07 FPS、编码/输出约 29.96 FPS、实际约 7.93 Mbps，`enc_drop=0`、`out_drop=0`、`write_fail=0`、队列为 0。新模型和完整 30 项跟踪参数继续保留，待用户重新观看确认播放与画框运动效果。
+- 已修改技术复盘 `docs/4k/4k_specialized_model_final_acceptance_20260719.md` 的结语，移除突兀的“真正困难的是克制”和连续三个“承认”，改为从训练数据、独立测试、ONNX/RKNN 一致性及板端完整推流四个环节说明识别正确率优化如何形成可验收闭环，结语重新聚焦本轮 YOLO 4K 识别正确率优化目的。
+- 经 Git 提交内容审查，已从工作树删除 `b00d067` 中 18 个不应长期保留的实验产物：14 个 `motion_*_20260716.json/.md` 重复扫描输出，以及 4 个中间诊断、过渡观看或已否决方案配置。源码、分析工具、单元测试、生产配置、最终汇总文档和仍有用途的 size20 配置均保留；汇总文档中两处对已删产物的引用已改为直接说明关键结果集中保留。当前仅形成可审查的 Git 删除修改，未提交、未推送、未改写历史。
+- 用户确认 `docs/4k_log*` 临时诊断文件没有必要上传。已删除 8 个文本日志及 `docs/4k_log_20260716004_frames/` 下 7 张过程抓帧（约 4.5 MB 二进制过程产物），并在 `.gitignore` 增加 `docs/4k_log_*`，防止同类日志和截图再次进入 Git；正式 4K 结论已保留在汇总报告中。
+- 用户要求继续清理 `docs/4k` 后，已删除 9 个历史/重复文档：闪烁方案长篇实验记录、18 Mbps 单次推流记录、3 个一次性探针记录，以及早期拉流复现、帧率修复、6 Mbps 验收和码率矩阵记录。保留 4K 架构方案、准确率微调与 INT8 校准规范、检测框运动指标和最新 30 FPS 码率验证；`docs/4k/README.md` 已收敛为当前文档索引，30 FPS 报告已移除对已删码率矩阵的引用。所有删除和索引修改仍未提交，待用户最后统一 commit。
+- 已审阅 `docs/artifacts`：目录内结构分析、候选 YAML 和剪枝/蒸馏方案共约 16 KB，且 `tools/dataset/distill_desktop6.py` 默认直接引用 `yolov8s_pruned10_model.yaml`，因此保留而不删除。新增 `docs/artifacts/README.txt`，说明各文件用途、候选结构与生产模型的边界，并明确这些文件不是板端权重。
+- 按文档清理计划，已删除 `docs/架构图.html`（旧版架构图）、`docs/performance_dashboard.html`（未引用的旧性能大屏）和 `docs/3588学习计划.txt`（早期个人学习计划）。NV12/H264 图解页脚已改为引用当前 `docs/architecture/alertgateway_architecture.html`；其他历史基线、性能记录和阶段性开发文档暂时保留。

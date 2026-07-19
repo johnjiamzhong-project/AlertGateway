@@ -65,10 +65,16 @@ button.active { background: #dbeafe; border-color: #2563eb; }
       <button id="deleteBox">删除选中框</button>
       <button id="clearBoxes">清空本图框</button>
     </div>
+    <div class="row">
+      <button id="zoomOut">缩小</button>
+      <button id="zoomIn">放大</button>
+      <button id="zoomFit">适应窗口</button>
+    </div>
     <div class="classes" id="classes"></div>
     <div class="boxes" id="boxes"></div>
     <p class="hint">
-      操作：先拖框也可以；点击已有框可选中，再点类别按钮或按 0-5 可修改选中框类别。
+      操作：空白处拖动新建框；点击已有框选中后，可拖框内移动，或拖黄色控制点调整边和角。
+      放大后可用画面区域的滚动条查看细节。点类别按钮或按 0-5 可修改选中框类别。
       没有选中框时，类别按钮只决定下一次新画框类别。删除选中框可移除。
       每张图完成后点保存。显示器按 laptop 标，负样本确认无六类目标后点标为空负样本。
     </p>
@@ -92,7 +98,9 @@ let selectedBox = -1;
 let drawing = null;
 let pointerStart = null;
 let scale = 1;
+let zoom = 1;
 const dragThreshold = 4;
+const handleRadius = 7;
 const jumpIndexEl = document.getElementById('jumpIndex');
 
 function setStatus(text) { statusEl.textContent = text; }
@@ -100,7 +108,7 @@ function setStatus(text) { statusEl.textContent = text; }
 function fitCanvas() {
   const maxW = Math.max(360, window.innerWidth - 340);
   const maxH = Math.max(260, window.innerHeight - 40);
-  scale = Math.min(maxW / image.naturalWidth, maxH / image.naturalHeight, 1.4);
+  scale = Math.min(maxW / image.naturalWidth, maxH / image.naturalHeight, 1.4) * zoom;
   canvas.width = Math.round(image.naturalWidth * scale);
   canvas.height = Math.round(image.naturalHeight * scale);
 }
@@ -148,6 +156,7 @@ function draw() {
     ctx.fillRect(r.x, Math.max(0, r.y - 20), textW, 20);
     ctx.fillStyle = '#fff';
     ctx.fillText(label, r.x + 4, Math.max(14, r.y - 6));
+    if (i === selectedBox) drawResizeHandles(r);
   });
   if (drawing) {
     ctx.lineWidth = 2;
@@ -155,6 +164,19 @@ function draw() {
     ctx.strokeRect(drawing.x1, drawing.y1, drawing.x2 - drawing.x1, drawing.y2 - drawing.y1);
   }
   renderBoxes();
+}
+
+function drawResizeHandles(rect) {
+  const handles = resizeHandles(rect);
+  ctx.fillStyle = '#ffdf2b';
+  ctx.strokeStyle = '#1f2933';
+  ctx.lineWidth = 1;
+  Object.values(handles).forEach(point => {
+    ctx.beginPath();
+    ctx.rect(point.x - handleRadius, point.y - handleRadius, handleRadius * 2, handleRadius * 2);
+    ctx.fill();
+    ctx.stroke();
+  });
 }
 
 function renderClasses() {
@@ -169,9 +191,13 @@ function renderClasses() {
 }
 
 function applyClass(cls) {
+  if (selectedBox < 0 && boxes.length === 1) selectedBox = 0;
   selectedClass = cls;
   if (selectedBox >= 0 && selectedBox < boxes.length) {
     boxes[selectedBox].cls = cls;
+    setStatus(`${index + 1}/${images.length} 已将选中框改为 ${classes[cls]}，请点击保存`);
+  } else if (boxes.length > 0) {
+    setStatus(`${index + 1}/${images.length} 请先点击要修改的框；当前 ${classes[cls]} 只用于新建框`);
   }
   renderClasses();
   draw();
@@ -279,14 +305,79 @@ function hitTest(point) {
   return -1;
 }
 
+function resizeHandles(rect) {
+  const cx = rect.x + rect.w / 2;
+  const cy = rect.y + rect.h / 2;
+  return {
+    nw: { x: rect.x, y: rect.y }, n: { x: cx, y: rect.y }, ne: { x: rect.x + rect.w, y: rect.y },
+    e: { x: rect.x + rect.w, y: cy }, se: { x: rect.x + rect.w, y: rect.y + rect.h },
+    s: { x: cx, y: rect.y + rect.h }, sw: { x: rect.x, y: rect.y + rect.h }, w: { x: rect.x, y: cy },
+  };
+}
+
+function selectedEditHit(point) {
+  if (selectedBox < 0 || selectedBox >= boxes.length) return null;
+  const rect = toCanvasBox(boxes[selectedBox]);
+  for (const [mode, handle] of Object.entries(resizeHandles(rect))) {
+    if (Math.hypot(point.x - handle.x, point.y - handle.y) <= handleRadius + 3) {
+      return { mode, rect };
+    }
+  }
+  if (point.x >= rect.x && point.x <= rect.x + rect.w && point.y >= rect.y && point.y <= rect.y + rect.h) {
+    return { mode: 'move', rect };
+  }
+  return null;
+}
+
+function clampRect(rect) {
+  let { x1, y1, x2, y2 } = rect;
+  x1 = Math.max(0, Math.min(canvas.width - 5, x1));
+  y1 = Math.max(0, Math.min(canvas.height - 5, y1));
+  x2 = Math.max(5, Math.min(canvas.width, x2));
+  y2 = Math.max(5, Math.min(canvas.height, y2));
+  if (x2 - x1 < 5) x2 = Math.min(canvas.width, x1 + 5);
+  if (y2 - y1 < 5) y2 = Math.min(canvas.height, y1 + 5);
+  return { x1, y1, x2, y2 };
+}
+
+function editedRect(original, mode, point, start) {
+  let x1 = original.x, y1 = original.y, x2 = original.x + original.w, y2 = original.y + original.h;
+  if (mode === 'move') {
+    const dx = point.x - start.x, dy = point.y - start.y;
+    x1 += dx; x2 += dx; y1 += dy; y2 += dy;
+    if (x1 < 0) { x2 -= x1; x1 = 0; }
+    if (y1 < 0) { y2 -= y1; y1 = 0; }
+    if (x2 > canvas.width) { x1 -= x2 - canvas.width; x2 = canvas.width; }
+    if (y2 > canvas.height) { y1 -= y2 - canvas.height; y2 = canvas.height; }
+    return { x1, y1, x2, y2 };
+  }
+  if (mode.includes('w')) x1 = point.x;
+  if (mode.includes('e')) x2 = point.x;
+  if (mode.includes('n')) y1 = point.y;
+  if (mode.includes('s')) y2 = point.y;
+  return clampRect({ x1, y1, x2, y2 });
+}
+
+function setSelectedBoxFromRect(rect) {
+  const box = fromCanvasRect(rect, boxes[selectedBox].cls);
+  if (box) boxes[selectedBox] = box;
+}
+
 canvas.addEventListener('mousedown', event => {
   const p = canvasPoint(event);
-  pointerStart = { x: p.x, y: p.y, hit: hitTest(p) };
+  const edit = selectedEditHit(p);
+  pointerStart = { x: p.x, y: p.y, hit: hitTest(p), edit };
   drawing = null;
+  if (edit) canvas.style.cursor = edit.mode === 'move' ? 'move' : 'nwse-resize';
 });
 window.addEventListener('mousemove', event => {
   if (!pointerStart) return;
   const p = clampCanvasPoint(canvasPoint(event));
+  if (pointerStart.edit) {
+    setSelectedBoxFromRect(editedRect(pointerStart.edit.rect, pointerStart.edit.mode, p, pointerStart));
+    draw();
+    return;
+  }
   const dx = p.x - pointerStart.x;
   const dy = p.y - pointerStart.y;
   if (!drawing && Math.hypot(dx, dy) >= dragThreshold) {
@@ -300,6 +391,14 @@ window.addEventListener('mousemove', event => {
 });
 window.addEventListener('mouseup', event => {
   if (!pointerStart) return;
+  if (pointerStart.edit) {
+    const p = clampCanvasPoint(canvasPoint(event));
+    setSelectedBoxFromRect(editedRect(pointerStart.edit.rect, pointerStart.edit.mode, p, pointerStart));
+    pointerStart = null;
+    canvas.style.cursor = 'crosshair';
+    draw();
+    return;
+  }
   if (!drawing) {
     if (pointerStart.hit >= 0) {
       selectedBox = pointerStart.hit;
@@ -341,6 +440,9 @@ document.getElementById('deleteBox').onclick = () => {
 document.getElementById('clearBoxes').onclick = () => {
   if (confirm('清空本图所有框？')) { boxes = []; selectedBox = -1; draw(); }
 };
+document.getElementById('zoomOut').onclick = () => { zoom = Math.max(0.5, zoom / 1.25); fitCanvas(); draw(); };
+document.getElementById('zoomIn').onclick = () => { zoom = Math.min(4, zoom * 1.25); fitCanvas(); draw(); };
+document.getElementById('zoomFit').onclick = () => { zoom = 1; fitCanvas(); draw(); };
 window.addEventListener('resize', () => { fitCanvas(); draw(); });
 window.addEventListener('keydown', event => {
   if (event.key >= '0' && event.key <= '5') applyClass(Number(event.key));
