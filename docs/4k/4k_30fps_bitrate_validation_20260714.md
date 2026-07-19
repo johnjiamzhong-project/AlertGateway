@@ -38,6 +38,6 @@ All three test presets use 3840x2160 at 30 FPS. The production V4L2 config/confi
 - tools/test/run_compare_12v18_20260714.sh: 执行两组板端测试并抓取 RTMP 输出.
 - tools/test/evaluate_quality_compare_12v18.py: 对齐帧、计算 PSNR/SSIM，并生成并排对比图和报告.
 - runs/testsrc2/quality_compare_12v18_20260714/: 输出 FLV 文件、板端日志、对齐帧、对比图和 README.
-- docs/4k/4k_bitrate_matrix_20260713.md: 历史 3/6/8/12 Mbps 矩阵及修正后的 30 FPS 12/18 Mbps 结果.
+- 早期 3/6/8/12 Mbps 矩阵结果已在本报告中按最终 30 FPS 测试口径归并，不再单独维护历史矩阵文档。
 
 注意：早期报告使用了旧二进制和 15 FPS 板端配置，已由本文记录的修正运行结果取代。

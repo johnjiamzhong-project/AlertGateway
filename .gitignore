@@ -36,5 +36,8 @@ runs/detect/
 runs/input_videos/
 runs/testsrc2/quality_compare_*/
 
+# temporary 4K diagnostic logs and extracted frames
+docs/4k_log_*
+
 # IDE/Codex settings
 .codex/

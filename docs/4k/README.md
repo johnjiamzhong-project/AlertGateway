@@ -5,17 +5,11 @@
 ## 架构与方案
 
 - [4K 拉流图像处理方案](4k_pull_stream_image_processing_plan.md): 单路 4K 流水线设计、ROI、切片和图像处理扩展点.
+- [4K 准确率微调与 INT8 校准](4k_accuracy_finetune_and_int8_calibration.md): 从已有 4K 视频按 1 FPS 抽帧、标注、按视频划分数据集、WSL 微调、量化校准和板端验收的执行规范。
 - [4K 架构图](../architecture/alertgateway_architecture.svg): 输入源、SRS、RK3588 推理、MPP 编码和输出流程.
 
-## 问题复现与帧率修复
+## 推流、帧率与码率验证
 
-- [4K 拉流问题复现](4k_pull_stream_reproduction_20260713.md): 原始 4K 卡顿和严重画质下降基线.
-- [4K 帧率修复](4k_framerate_fix_20260713.md): 历史 30 转 15 FPS 节奏修复及 15 FPS 验证.
-- [4K 6 Mbps 验收](4k_6m_acceptance_20260713.md): 专用 6 Mbps 拉流验收；生产 V4L2 配置保持不变.
-
-## 码率与画质验证
-
-- [4K 码率矩阵](4k_bitrate_matrix_20260713.md): 历史 3/6/8/12 Mbps 矩阵及修正后的 30 FPS 12/18 Mbps 结果.
 - [4K 30 FPS 码率验证](4k_30fps_bitrate_validation_20260714.md): 当前代码修改、6/12/18 Mbps 预设、修正后的板端指标和产物路径.
 - [12 与 18 Mbps 画质报告](../../runs/testsrc2/quality_compare_12v18_20260714/README.md): 对齐帧、PSNR/SSIM、并排对比图、FLV 录制和板端日志.
 
