@@ -264,9 +264,11 @@ void PullStreamThread::run() {
                         continue;
                     }
 
-                    // 阻塞投递编码线程（保证流畅，形成背压）
+                    // 与 V4L2 路径一致：编码队列满时最多等待 100ms。
+                    // 拉流/解码偶发 burst 不应因容量为 1 的队列立即丢掉编码帧；
+                    // 有界等待仍可在编码真正卡住时避免无限阻塞。
                     if (running_) {
-                        if (enc_queue_.push(frame_obj, 0)) ++enc_pushed;
+                        if (enc_queue_.push(frame_obj, 100)) ++enc_pushed;
                         else ++enc_dropped;
                     }
 

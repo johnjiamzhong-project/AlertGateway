@@ -82,6 +82,11 @@
 模型的 RKNN INT8 转换质量，不能替代标注和微调，也不能单独提升识别率。完整可执行流程见
 [4K 准确率微调与 INT8 校准](docs/4k/4k_accuracy_finetune_and_int8_calibration.md)。
 
+本轮已完成冻结的 4K final test 验收：166 张图片、221 个标注框。浮点模型 Precision 为
+89.6%、Recall 为 82.3%、mAP50 为 92.22%；同一评估口径下，ONNX mAP50 为 87.73%，RKNN
+INT8 mAP50 为 87.79%。4K 专用候选已在 RK3588 上完成 3840×2160 拉流、YOLO 推理、叠框、
+MPP 编码和 RTMP 回推验证，但仍保持为独立候选，不替换 V4L2 生产模型。
+
 ### 检测结果处理
 
 替代原有的离岗/睡岗告警状态机，逻辑更简单：
@@ -159,7 +164,9 @@ AlertGateway/
 ├── config/
 │   ├── config.json          # 公共配置与 active_config 入口
 │   ├── config_v4l2.json     # V4L2 摄像头配置
-│   └── config_4k_18mbps.json # 4K pull_stream 配置
+│   ├── config_4k_18mbps.json # 4K pull_stream、18 Mbps 基础配置
+│   ├── config_4k_8mbps.json  # 4K pull_stream、8 Mbps 观看配置
+│   └── config_4k_candidate_20260719.json # 4K 专用模型隔离候选
 ├── src/
 │   ├── main.cpp
 │   ├── common/
@@ -214,6 +221,8 @@ AlertGateway/
 
 - `config/config_v4l2.json`：V4L2 源、640×480、3 Mbps、对应 RTMP 地址，以及 Thumbnail/ROI/Tiling 开关。
 - `config/config_4k_18mbps.json`：4K `pull_stream` 源、3840×2160、18 Mbps、对应 RTMP 地址，以及 4K 专用的 Thumbnail/ROI/Tiling 开关。
+- `config/config_4k_8mbps.json`：4K `pull_stream` 源、3840×2160、8 Mbps，供高码率播放受限时观看结果流。
+- `config/config_4k_candidate_20260719.json`：独立 4K 专用 RKNN 候选，显式启用已验收的检测框跟踪平滑参数，不能替代 `config/config.json` 的生产入口。
 
 切换 4K 时只将 `active_config` 改为 `"config_4k_18mbps.json"`。程序会先加载公共配置，
 再递归合并选中的分配置；视频源、分辨率、码率和图像处理参数均由对应模式配置明确维护。
@@ -231,15 +240,15 @@ AlertGateway/
 V4L2 的采集分辨率必须是摄像头实际支持的分辨率；当前编码输出尺寸跟随视频源尺寸，
 不会仅通过配置把 V4L2 画面放大为 4K。4K 原始输入目前使用 `pull_stream` 配置。
 
-当前工作区的 `config/config.json` 已选择 `config_4k_18mbps.json`，用于 201 板 4K 测试。
-先将配置部署到 201 板：
+当前工作区的 `config/config.json` 已选择 `config_4k_18mbps.json`，用于 192.168.0.200 板 4K 测试。
+先将配置部署到 192.168.0.200 板：
 
 ```bash
 scp config/config.json config/config_4k_18mbps.json \
-  firefly@192.168.0.201:~/AlertGateway/config/
+  firefly@192.168.0.200:~/AlertGateway/config/
 ```
 
-然后在 WSL/主机循环发布输入文件到 SRS；视频不是直接写入板端，201 板会从该 RTMP 地址拉流：
+然后在 WSL/主机循环发布输入文件到 SRS；视频不是直接写入板端，.200 板会从该 RTMP 地址拉流：
 
 ```bash
 ffmpeg -re -stream_loop -1 \
@@ -248,18 +257,53 @@ ffmpeg -re -stream_loop -1 \
   rtmp://192.168.0.168/live/testsrc2
 ```
 
-在 201 板启动处理程序：
+在 .200 板启动处理程序：
 
 ```bash
-ssh firefly@192.168.0.201 \
+ssh firefly@192.168.0.200 \
   'cd ~/AlertGateway && ./AlertGateway config/config.json'
 ```
 
-201 板拉取 `live/testsrc2` 输入流，完成 RKNN 推理和 MPP H.264 编码后输出到
+.200 板拉取 `live/testsrc2` 输入流，完成 RKNN 推理和 MPP H.264 编码后输出到
 `rtmp://192.168.0.168/live/alertgateway`，播放器可直接查看该地址。项目所有推理结果
-推流统一使用该固定地址。输出流名称保留
-历史上的 `v4l2_720p` 名称，实际尺寸为 3840×2160。恢复 V4L2 测试时，将
+推流统一使用该固定地址，实际 4K 输出尺寸为 3840×2160。恢复 V4L2 测试时，将
 `active_config` 改回 `config_v4l2.json` 并重启程序。
+
+### 一键 4K 候选观看
+
+在主机项目根目录运行：
+
+```bash
+./run.sh
+```
+
+`run.sh` 是一次性、隔离的人工观看入口：它固定调用
+`tools/test/run_4k_candidate_on_board.sh`，将
+`runs/input_videos/4k/VID_20260712_131214.mp4` 在 **180 秒测试窗口内循环发布**到
+`live/testsrc2`，再通过 SSH 启动 `192.168.0.200` 板上的
+`config_4k_candidate_20260719.json`。结果始终推送到
+`rtmp://192.168.0.168/live/alertgateway`。
+
+该脚本会先检查视频、SRS API、板端候选文件和已有 `AlertGateway` 进程；已有板端进程时会终止本次启动，
+不会擅自杀掉其他测试。发生发布、拉流、推理、编码或回推错误时，完整调试日志保留在
+`/tmp/alertgateway_4k_时间戳/`。需要更换视频或时长时，直接调用底层脚本：
+
+```bash
+tools/test/run_4k_candidate_on_board.sh \
+  runs/input_videos/4k/VID_20260712_131214.mp4 180
+```
+
+`start.sh` 与此不同：它应在**板端** `~/AlertGateway` 目录执行，后台启动该目录中的
+`AlertGateway config/config.json`，并管理 performance 锁频服务，适用于常驻运行：
+
+```bash
+bash start.sh start
+bash start.sh status
+bash start.sh log
+bash start.sh stop
+```
+
+`start.sh` 不发布测试视频、不使用 4K 候选配置，也不会自动在固定时长后退出；主机侧人工观看请使用 `run.sh`。
 
 ---
 
@@ -288,9 +332,9 @@ WSL2 交叉编译工具链：
 cmake -B build -DCMAKE_TOOLCHAIN_FILE=cmake/aarch64-toolchain.cmake
 cmake --build build -j$(nproc)
 
-# 传到 201 板
-scp build/AlertGateway firefly@192.168.0.201:~/AlertGateway/
-scp config/config.json config/config_4k_18mbps.json firefly@192.168.0.201:~/AlertGateway/config/
+# 传到 192.168.0.200 板
+scp build/AlertGateway firefly@192.168.0.200:~/AlertGateway/
+scp config/config.json config/config_4k_18mbps.json firefly@192.168.0.200:~/AlertGateway/config/
 ```
 
 如果 sysroot 或 RKNN 链接 stub 不在默认路径，可显式传入：
@@ -340,7 +384,7 @@ cd ~/AlertGateway
 | `YOLOv5s与YOLOv8s-NPU耗时对比测试记录.md` | YOLOv5s vs YOLOv8s 的 `rknn_run` 对比测试，纠正"40ms 是硬件极限"结论，定位 CPU/NPU governor 对耗时的实际影响 |
 | `YOLOv8s-RK3588推理性能优化路线.md` | YOLOv8s 在 RK3588 上的性能优化路线、阶段结论和后续方向 |
 | `YOLOv8s-RK3588推理优化实验记录.md` | EXP-001 起的推理性能、精度、画质和输入尺寸实验记录 |
-| `知乎文章-NPU推理耗时踩坑记录.md` | 上述测试过程的踩坑实录整理版 |
+| `4k/4K单路性能与多路并发学习计划.md` | 当前学习阶段的路线：先建立单路 4K 性能基线和单变量优化，再开展两路并发 PoC |
 | `第三阶段-设备树入门.md` | RK3588S 设备树（Device Tree）入门记录 |
 | `第五阶段-MPP硬解.md` | MPP 硬件解码开发记录 |
 | `第五阶段-多媒体硬解完成记录.md` | 多媒体硬解功能完成记录 |
@@ -382,17 +426,3 @@ cd ~/AlertGateway
 ## License
 
 本项目代码以 MIT License 开源，见 `LICENSE`。`third_party/` 下的头文件（RKNN、MPP、RGA、Paho MQTT、nlohmann/json）保留各自上游的原始授权条款。
-
-
-
-## 2026-07-14 4K pull-stream output and bitrate validation
-
-The 4K pull-stream path now forwards decoded source frames to the encoder without the previous pre-encode 30-to-15 FPS pacing. Encoder and stream queues use non-blocking pushes to prevent backpressure from building latency; inference continues in latest-frame mode and may drop stale inference frames.
-
-For 4K testing, stream.bitrate_kbps is configurable with presets: 6000, 12000, and 18000. Preset files are under runs/testsrc2/: config_testsrc2_4k_6m.json, config_testsrc2_4k_12m.json, and config_testsrc2_4k_18m.json. The current workspace entry config selects config_4k_18mbps.json; restore the V4L2 configuration by selecting config_v4l2.json.
-
-Corrected 30 FPS 12/18 Mbps board validation: 12 Mbps measured 12007.9 kbps at 29.99 FPS; 18 Mbps measured 18087.0 kbps at 30.08 FPS. Both had zero write failures and zero queue depth. In the aligned single-frame quality sample, PSNR was 28.4200/28.4099 dB and SSIM was 0.5735/0.5813 for 12/18 Mbps respectively. Full captures and logs are in runs/testsrc2/quality_compare_12v18_20260714/.
-
-Detailed test record: docs/4k/4k_30fps_bitrate_validation_20260714.md
-
-4K document index: docs/4k/README.md

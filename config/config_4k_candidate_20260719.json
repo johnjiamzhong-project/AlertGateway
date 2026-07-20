@@ -1,5 +1,5 @@
 {
-  "active_config": "config_4k_8mbps.json",
+  "active_config": "config_4k_18mbps.json",
   "model": {
     "path": "model/yolov8s_4k_photos_head_20e_20260718_finaltest_int8.rknn",
     "output_layout": "rockchip_dfl",
