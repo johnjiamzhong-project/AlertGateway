@@ -231,6 +231,57 @@ void EncodeThread::draw_rect_nv12(uint8_t* nv12, int w, int h,
     }
 }
 
+// 这是渲染前的只读审计，不参与 NMS、Tile 合并或 Tracker 关联。它记录的是即将画到
+// 当前视频帧上的最终显示快照，因此可用于区分“前级已重复”与“跟踪/对齐后重新重叠”。
+void EncodeThread::audit_render_overlaps(const DisplayDetections& display, const Frame& frame) {
+    if (!cfg_.render_overlap_audit || display.detections.size() < 2) return;
+    if (display.detection_frame_id == last_audited_detection_frame_id_ &&
+        display.detection_pts_ms == last_audited_detection_pts_ms_) {
+        return;
+    }
+    last_audited_detection_frame_id_ = display.detection_frame_id;
+    last_audited_detection_pts_ms_ = display.detection_pts_ms;
+
+    const float min_intersection_area = std::max(0.0f, cfg_.render_overlap_min_intersection_area_px);
+    for (size_t i = 0; i < display.detections.size(); ++i) {
+        const Detection& a = display.detections[i];
+        const float a_width = std::max(0.0f, a.x2 - a.x1);
+        const float a_height = std::max(0.0f, a.y2 - a.y1);
+        const float a_area = a_width * a_height;
+        for (size_t j = i + 1; j < display.detections.size(); ++j) {
+            const Detection& b = display.detections[j];
+            const float ix1 = std::max(a.x1, b.x1);
+            const float iy1 = std::max(a.y1, b.y1);
+            const float ix2 = std::min(a.x2, b.x2);
+            const float iy2 = std::min(a.y2, b.y2);
+            const float intersection_width = std::max(0.0f, ix2 - ix1);
+            const float intersection_height = std::max(0.0f, iy2 - iy1);
+            const float intersection_area = intersection_width * intersection_height;
+            if (intersection_area <= min_intersection_area) continue;
+
+            const float b_area = std::max(0.0f, b.x2 - b.x1) * std::max(0.0f, b.y2 - b.y1);
+            const float union_area = a_area + b_area - intersection_area;
+            const float smaller_area = std::min(a_area, b_area);
+            const float iou = union_area > 0.0f ? intersection_area / union_area : 0.0f;
+            const float ios = smaller_area > 0.0f ? intersection_area / smaller_area : 0.0f;
+            std::cout << "[RenderOverlap] channel=" << cfg_.channel_id
+                      << " video_frame=" << frame.frame_id
+                      << " video_pts_ms=" << frame.pts_ms
+                      << " detection_frame=" << display.detection_frame_id
+                      << " detection_pts_ms=" << display.detection_pts_ms
+                      << " pts_delta_ms=" << display.pts_delta_ms
+                      << " pair=" << i << ',' << j
+                      << " a={class_id=" << a.class_id << ",label=" << a.label
+                      << ",score=" << a.score << ",box=" << a.x1 << ',' << a.y1 << ',' << a.x2 << ',' << a.y2 << '}'
+                      << " b={class_id=" << b.class_id << ",label=" << b.label
+                      << ",score=" << b.score << ",box=" << b.x1 << ',' << b.y1 << ',' << b.x2 << ',' << b.y2 << '}'
+                      << " intersection={box=" << ix1 << ',' << iy1 << ',' << ix2 << ',' << iy2
+                      << ",area=" << intersection_area << '}'
+                      << " iou=" << iou << " ios=" << ios << "\n" << std::flush;
+        }
+    }
+}
+
 void EncodeThread::draw_solid_rect_nv12(uint8_t* nv12, int w, int h,
                                          int x1, int y1, int x2, int y2,
                                          uint8_t yv, uint8_t uv, uint8_t vv) {
@@ -440,7 +491,7 @@ void EncodeThread::draw_detection_label_nv12(uint8_t* nv12, int w, int h,
 //   3) 叠框：从 shared_dets_ 读最新一次推理结果（可能是上一帧甚至更早的，不强求对齐），
 //      直接在NV12像素上画绿框。
 //   4) 喂给MPP硬编码器：从DRM buffer group取一块物理内存，RGA直接写入（省掉memcpy），
-//      包装成MppFrame调 encode_put_frame()；PTS按 frame_idx_*1000/fps 线性递推
+//      包装成MppFrame调 encode_put_frame()；PTS沿用源视频媒体时间戳
 //      （假设严格匀速出帧，没有用实际墙钟时间戳）。
 //   5) 取编码结果：encode_put_frame/encode_get_packet 是异步关系，硬件内部有流水线
 //      缓冲，一次put不一定对应一次get，要用while循环把当前能取的包全部取干净，
@@ -471,25 +522,41 @@ void EncodeThread::run() {
         if (alignment_frames.size() <= static_cast<size_t>(std::max(0, cfg_.detection_alignment_delay_frames))) continue;
         frame = std::move(alignment_frames.front());
         alignment_frames.pop_front();
-        if (frame.raw_data.empty()) continue;
+        if (frame.empty()) continue;
         const auto frame_t = std::chrono::steady_clock::now();
         ++input_frames;
 
-        // 先从 DRM 池取 buffer，让 RGA 转换结果直接写入，省掉一次 memcpy
+        // 硬解码路径已经提供可导入的 MPP DRM buffer；普通采集/兼容路径才在这里申请编码 buffer。
         MppBuffer frame_buf = nullptr;
-        MPP_RET ret = mpp_buffer_get(buf_group_, &frame_buf, frame_size);
-        if (ret != MPP_OK || !frame_buf) {
-            std::cerr << "[Encode] mpp_buffer_get failed: " << ret << "\n";
-            continue;
+        bool owns_frame_buffer = false;
+        MPP_RET ret = MPP_OK;
+        if (frame.buffer_fd() >= 0 && frame.pixel_format == PixelFormat::NV12) {
+            frame_buf = frame.dma_buffer->buffer;
+        } else {
+            ret = mpp_buffer_get(buf_group_, &frame_buf, frame_size);
+            owns_frame_buffer = true;
+            if (ret != MPP_OK || !frame_buf) {
+                std::cerr << "[Encode] mpp_buffer_get failed: " << ret << "\n";
+                continue;
+            }
         }
         uint8_t* drm_ptr = static_cast<uint8_t*>(mpp_buffer_get_ptr(frame_buf));
         if (!drm_ptr) {
             std::cerr << "[Encode] mpp_buffer_get_ptr returned null\n";
-            mpp_buffer_put(frame_buf);
+            if (owns_frame_buffer) mpp_buffer_put(frame_buf);
             continue;
         }
 
-        if (frame.pixel_format == PixelFormat::NV12) {
+        if (frame.buffer_fd() >= 0 && frame.pixel_format == PixelFormat::NV12) {
+            // 拉流硬解码/RGA 已经生成了 MPP DRM buffer，直接交给编码器，避免
+            // DMA-BUF -> CPU vector -> 编码 DRM buffer 的往返拷贝。
+            frame_buf = frame.dma_buffer->buffer;
+            drm_ptr = static_cast<uint8_t*>(mpp_buffer_get_ptr(frame_buf));
+            if (!drm_ptr) {
+                std::cerr << "[Encode] decoded DMA buffer has no CPU mapping\n";
+                continue;
+            }
+        } else if (frame.pixel_format == PixelFormat::NV12) {
             // 输入已经是 NV12，直接拷贝到 MPP 的 DRM 缓冲区，完全避免格式转换
             memcpy(drm_ptr, frame.raw_data.data(), frame_size);
         } else {
@@ -508,6 +575,7 @@ void EncodeThread::run() {
 
         // 当前帧先完整写入 DRM buffer，再叠加与其 PTS 对齐的检测结果。
         const auto display = shared_dets_.get_for_pts(frame.pts_ms);
+        audit_render_overlaps(display, frame);
         const int detection_box_thickness = (w >= 3840 && h >= 2160) ? 6 : 2;
         for (const auto& det : display.detections) {
             draw_rect_nv12(drm_ptr, w, h,
@@ -533,7 +601,7 @@ void EncodeThread::run() {
         ret = mpp_frame_init(&mpp_frame);
         if (ret != MPP_OK || !mpp_frame) {
             std::cerr << "[Encode] mpp_frame_init failed: " << ret << "\n";
-            mpp_buffer_put(frame_buf);
+            if (owns_frame_buffer) mpp_buffer_put(frame_buf);
             continue;
         }
         mpp_frame_set_width(mpp_frame,      w);
@@ -541,7 +609,11 @@ void EncodeThread::run() {
         mpp_frame_set_hor_stride(mpp_frame, w);
         mpp_frame_set_ver_stride(mpp_frame, h);
         mpp_frame_set_fmt(mpp_frame,        MPP_FMT_YUV420SP);
-        mpp_frame_set_pts(mpp_frame,        frame_idx_ * 1000 / cfg_.fps);  // 按固定帧率线性推算PTS(ms)
+        // Preserve the source-side monotonic timestamp. If upstream decode or
+        // resize falls below the configured FPS, the output timeline must
+        // reflect the real frame spacing instead of pretending every frame
+        // arrived at a fixed 30 FPS cadence.
+        mpp_frame_set_pts(mpp_frame,        frame.pts_ms);
         mpp_frame_set_buffer(mpp_frame,     frame_buf);
         mpp_frame_set_eos(mpp_frame,        0);
 
@@ -549,7 +621,7 @@ void EncodeThread::run() {
         ret = mpi_->encode_put_frame(ctx_, mpp_frame);
         // 销毁 MppFrame 这个"描述符"对象
         mpp_frame_deinit(&mpp_frame);
-        mpp_buffer_put(frame_buf);
+        if (owns_frame_buffer) mpp_buffer_put(frame_buf);
         if (ret != MPP_OK) {
             std::cerr << "[Encode] encode_put_frame failed: " << ret << "\n";
             ++put_failures;
@@ -599,7 +671,8 @@ void EncodeThread::run() {
         if (elapsed >= 10.0) {
             const double avg_ms = input_frames == 0 ? 0.0
                 : (processing_us / 1000.0) / static_cast<double>(input_frames);
-            std::cerr << "[EncodeStats] input_fps=" << (input_frames / elapsed)
+            std::cerr << "[EncodeStats] channel=" << cfg_.channel_id
+                      << " input_fps=" << (input_frames / elapsed)
                       << " packet_fps=" << (encoded_packets / elapsed)
                       << " bitrate_kbps=" << (encoded_bytes * 8.0 / elapsed / 1000.0)
                       << " avg_process_ms=" << avg_ms

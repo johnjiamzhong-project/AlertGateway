@@ -11,12 +11,16 @@
 #include "common/SharedDetections.hpp"
 
 struct EncodeConfig {
+    std::string channel_id = "single";
     int width;
     int height;
     int fps;
     int bitrate_kbps = 2000;  // CBR目标码率；RTMP直播推流要稳定带宽，不用VBR换画质
     bool draw_detection_labels = true;
     int detection_alignment_delay_frames = 2; // 仅延后编码，帧率保持不变
+    // 仅诊断：在真正绘制前检查显示快照中的框是否相交，不改变任何检测/跟踪结果。
+    bool render_overlap_audit = true;
+    float render_overlap_min_intersection_area_px = 1.0f;
 };
 
 // 编码线程：取帧 → YUYV直转NV12 → 叠最新检测框 → MPP硬编码H.264 → 写EncodedPacket队列。
@@ -66,6 +70,7 @@ private:
     static void draw_detection_label_nv12(uint8_t* nv12, int w, int h,
                                           int x1, int y1, int x2, int y2,
                                           const std::string& label_str);
+    void audit_render_overlaps(const DisplayDetections& display, const Frame& frame);
 
     EncodeConfig                  cfg_;
     BlockingQueue<Frame>&         in_queue_;
@@ -78,4 +83,7 @@ private:
     MppApi*        mpi_       = nullptr;  // MPP 函数接口表，编解码操作都通过它调用
     MppBufferGroup buf_group_ = nullptr;  // DRM类型buffer池，硬件编码器能直接DMA访问
     int64_t        frame_idx_ = 0;        // 累计编码帧数，用于按 cfg_.fps 推算每帧的PTS
+    // 同一检测快照通常会被连续编码到多个视频帧；只审计/记录一次，避免重复刷日志。
+    uint64_t       last_audited_detection_frame_id_ = UINT64_MAX;
+    int64_t        last_audited_detection_pts_ms_ = INT64_MIN;
 };

@@ -6,6 +6,7 @@
 #include "common/BlockingQueue.hpp"
 
 struct MqttConfig {
+    std::string channel_id = "single";
     std::string broker;
     int         port;
     std::string topic;

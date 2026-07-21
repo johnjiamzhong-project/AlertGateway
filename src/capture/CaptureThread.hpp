@@ -5,11 +5,13 @@
 #include <vector>
 #include "common/BlockingQueue.hpp"
 #include "common/Frame.hpp"
+#include "common/FrameBufferPool.hpp"
 #include "capture/IVideoSource.hpp"
 
 
 // 摄像头配置，从 config.json 读取后传入 CaptureThread
 struct CameraConfig {
+    std::string channel_id = "single";
     std::string device;  // V4L2 设备节点，如 /dev/video20
     int width;           // 采集分辨率宽（像素）
     int height;          // 采集分辨率高（像素）
@@ -18,9 +20,9 @@ struct CameraConfig {
 
 // V4L2 采集线程，Pipeline 的数据源头。实现 IVideoSource 接口。
 //
-// 使用 mmap 零拷贝模式：内核采集缓冲区直接映射到用户空间，
-// 取帧时只做一次 assign 拷贝（内核buf → Frame::raw_data），
-// 随即归还内核缓冲区（VIDIOC_QBUF），采集延迟最低。
+// 使用 mmap 模式：内核采集缓冲区直接映射到用户空间，
+// 取帧时只做一次 assign 拷贝（内核buf → 共享 Frame::raw_data），
+// 随即归还内核缓冲区（VIDIOC_QBUF）；之后编码/推理队列共享该像素存储。
 //
 // 每帧同时投递给两条下游：
 //   enc_queue  — 阻塞投递（timeout=100ms），每帧必达，背压由队列容量控制
@@ -30,7 +32,8 @@ class CaptureThread : public IVideoSource {
 public:
     CaptureThread(const CameraConfig& cfg,
                   BlockingQueue<Frame>& enc_queue,
-                  BlockingQueue<Frame>& infer_queue);
+                  BlockingQueue<Frame>& infer_queue,
+                  std::shared_ptr<FrameBufferPool> frame_pool = nullptr);
     ~CaptureThread();
 
     // 依次执行：打开设备 → 申请 mmap 缓冲区 → 启动采集流 → 起线程
@@ -58,6 +61,7 @@ private:
     CameraConfig            cfg_;
     BlockingQueue<Frame>&   enc_queue_;    // 每帧必达 → EncodeThread
     BlockingQueue<Frame>&   infer_queue_;  // 尽力投递 → InferThread（可丢帧）
+    std::shared_ptr<FrameBufferPool> frame_pool_;
     std::thread             thread_;
     std::atomic<bool>       running_{false};
     int                     fd_ = -1;          // V4L2 设备文件描述符

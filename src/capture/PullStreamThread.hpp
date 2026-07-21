@@ -4,15 +4,21 @@
 #include <atomic>
 #include "common/BlockingQueue.hpp"
 #include "common/Frame.hpp"
+#include "common/FrameBufferPool.hpp"
 #include "capture/IVideoSource.hpp"
 
 // 拉流配置，从 config.json 读取后传入 PullStreamThread
 struct PullStreamConfig {
+    std::string channel_id = "single";
     std::string url;          // RTSP/RTMP/HTTP-FLV 拉流地址，如 rtmp://127.0.0.1/live/desk
     int width;                // 期望分辨率宽（像素）
     int height;               // 期望分辨率高（像素）
+    // 解码后的处理/输出分辨率。为 0 时保持解码分辨率；拉 4K 时可设为 1920x1080。
+    int output_width = 0;
+    int output_height = 0;
     int fps;                  // 期望帧率
     int reconnect_sec = 5;    // 断线重连等待秒数，默认 5 秒
+    bool hardware_decode = false; // 使用板端 h264/hevc_rkmpp 输出 DRM_PRIME
 };
 
 // PullStreamThread：实现 IVideoSource 接口的拉流线程。
@@ -27,7 +33,8 @@ class PullStreamThread : public IVideoSource {
 public:
     PullStreamThread(const PullStreamConfig& cfg,
                      BlockingQueue<Frame>& enc_queue,
-                     BlockingQueue<Frame>& infer_queue);
+                     BlockingQueue<Frame>& infer_queue,
+                     std::shared_ptr<FrameBufferPool> frame_pool);
     ~PullStreamThread();
 
     // 启动拉流工作线程
@@ -37,11 +44,14 @@ public:
 
 private:
     static int interrupt_callback(void* opaque);
+    std::string log_tag() const;
     void run();          // 工作线程主循环
 
     PullStreamConfig        cfg_;
     BlockingQueue<Frame>&   enc_queue_;    // 投递给 EncodeThread
     BlockingQueue<Frame>&   infer_queue_;  // 投递给 InferThread（丢帧）
+    std::shared_ptr<FrameBufferPool> frame_pool_;
+    MppBufferGroup output_buffer_group_ = nullptr;
     std::thread             thread_;
     std::atomic<bool>       running_{false};
 };

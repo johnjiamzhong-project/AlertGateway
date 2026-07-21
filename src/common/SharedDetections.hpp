@@ -75,7 +75,7 @@ struct SharedDetections {
         for (size_t ti = 0; ti < tracks_.size(); ++ti) {
             const Detection& association_box = tracks_[ti].smooth;
             for (size_t di = 0; di < dets.size(); ++di) {
-                if (tracks_[ti].smooth.class_id != dets[di].class_id) continue;
+                const bool same_class = tracks_[ti].smooth.class_id == dets[di].class_id;
                 const float overlap = iou(association_box, dets[di]);
                 const float distance = center_distance(association_box, dets[di]);
                 const float max_distance = std::max(48.0f,
@@ -90,10 +90,33 @@ struct SharedDetections {
                     std::max(std::hypot(track_w, track_h), std::hypot(det_w, det_h)));
                 const bool distance_match = distance <= std::max(48.0f, local_distance) &&
                                             size_similarity >= 0.40f;
-                if (overlap < config_.match_iou && !distance_match) continue;
+                // 同类别检测在前级通常已经做过包含去重，但检测框会随帧抖动、
+                // ROI 复检切换而改变尺寸。若旧框与新框仍是高 IoS 的包含关系，
+                // 不能因为 IoU/尺寸相似度偏低而另建一条轨迹，否则 display_hold
+                // 期间会把旧框和新框同时发布出来。
+                const float intersection = intersection_area(association_box, dets[di]);
+                const float smaller_area = std::min(box_area(association_box), box_area(dets[di]));
+                const float containment = smaller_area > 0.0f ? intersection / smaller_area : 0.0f;
+                const Detection& inner = box_area(association_box) <= box_area(dets[di])
+                    ? association_box : dets[di];
+                const Detection& outer = box_area(association_box) <= box_area(dets[di])
+                    ? dets[di] : association_box;
+                const bool containment_match = containment >= kTrackContainmentThreshold &&
+                                               center_inside(inner, outer);
+                // 跨类别的近同框或强包含框不是两条可同时展示的轨迹；它们是同一
+                // 位置的竞争候选。先关联到原轨迹，后续由两帧确认再决定是否切换。
+                const bool cross_class_competitor = !same_class &&
+                    (overlap >= kCrossClassTrackDuplicateIoU ||
+                     (containment >= kCrossClassContainmentThreshold && center_inside(inner, outer)));
+                if (same_class) {
+                    if (overlap < config_.match_iou && !distance_match && !containment_match) continue;
+                } else if (!cross_class_competitor) {
+                    continue;
+                }
                 const float active_bonus = tracks_[ti].state == TrackState::Active ? 0.05f : 0.0f;
-                candidates.push_back({ti, di, overlap, distance,
-                    overlap + size_similarity * 0.10f - distance / max_distance * 0.05f + active_bonus});
+                candidates.push_back({ti, di, overlap, distance, cross_class_competitor,
+                    overlap + size_similarity * 0.10f + (same_class ? containment * 0.10f : 0.05f) -
+                    distance / max_distance * 0.05f + active_bonus});
             }
         }
         std::sort(candidates.begin(), candidates.end(),
@@ -169,6 +192,38 @@ struct SharedDetections {
             track.last_reversal_damped = false;
             const bool was_active = track.state == TrackState::Active;
             const Detection prior_smooth = track.smooth;
+            bool cross_class_switch_confirmed = false;
+            if (c.cross_class_competitor) {
+                if (track.cross_class_pending_hits > 0 &&
+                    track.cross_class_pending.class_id == dets[c.detection].class_id &&
+                    is_cross_class_competitor(track.cross_class_pending, dets[c.detection])) {
+                    ++track.cross_class_pending_hits;
+                } else {
+                    track.cross_class_pending = dets[c.detection];
+                    track.cross_class_pending_hits = 1;
+                }
+                matched_tracks[c.track] = matched_dets[c.detection] = true;
+                // 单帧误分类时保持旧稳定框，同时吃掉竞争检测，绝不再创建第二条轨迹。
+                if (track.cross_class_pending_hits < kCrossClassSwitchConfirmHits) {
+                    track.last_detection_pts_ms = pts_ms;
+                    track.misses = 0;
+                    if (config_.debug_logging) {
+                        std::cout << "[TrackExclusive] pending track=" << track.id
+                                  << " old=" << prior_smooth.label
+                                  << " challenger=" << dets[c.detection].label << "\n";
+                    }
+                    continue;
+                }
+                cross_class_switch_confirmed = true;
+                track.cross_class_pending_hits = 0;
+                if (config_.debug_logging) {
+                    std::cout << "[TrackExclusive] confirmed track=" << track.id
+                              << " old=" << prior_smooth.label
+                              << " new=" << dets[c.detection].label << "\n";
+                }
+            } else {
+                track.cross_class_pending_hits = 0;
+            }
             const float dt_sec = std::max(0.001f, static_cast<float>(pts_ms - track.last_detection_pts_ms) / 1000.0f);
             const float raw_dx = (dets[c.detection].x1 + dets[c.detection].x2 -
                                  track.last_measurement.x1 - track.last_measurement.x2) * 0.5f;
@@ -204,7 +259,8 @@ struct SharedDetections {
             if (!deadzone) {
                 // 中心和尺寸分开滤波。运动量按目标自身尺寸归一化，因此不依赖 4K 固定像素阈值。
                 // 静止时中心/尺寸强平滑；快速运动时只让中心快速跟随，尺寸仍保持较强抑噪。
-                filter_reset = track.state != TrackState::Active || c.overlap < config_.match_iou;
+                filter_reset = track.state != TrackState::Active || c.overlap < config_.match_iou ||
+                               cross_class_switch_confirmed;
                 if (filter_reset) {
                     smooth_measurement = dets[c.detection];
                     track.filtered_center_motion = 0.0f;
@@ -281,9 +337,11 @@ struct SharedDetections {
                    (t.hits < config_.confirm_hits && t.misses > 0);
         }), tracks_.end());
         last_lost_ = before - tracks_.size();
+        last_lost_ += deduplicate_tracks(pts_ms);
         std::vector<Detection> snapshot_detections;
         for (const Track& track : tracks_)
             if (is_displayable(track, pts_ms)) snapshot_detections.push_back(track.smooth);
+        deduplicate_display_detections(snapshot_detections);
         update_motion_stats(matched_motion, frame_id, pts_ms);
         publish_snapshot(frame_id, pts_ms, std::move(snapshot_detections));
     }
@@ -299,6 +357,7 @@ struct SharedDetections {
             for (auto it = snapshots_.rbegin(); it != snapshots_.rend(); ++it) {
                 if (it->pts_ms > current_pts_ms) continue;
                 result.detections = it->detections;
+                if (config_.display_mode != 0) deduplicate_display_detections(result.detections);
                 result.detection_frame_id = it->frame_id;
                 result.detection_pts_ms = it->pts_ms;
                 result.pts_delta_ms = current_pts_ms - it->pts_ms;
@@ -321,6 +380,7 @@ struct SharedDetections {
         std::vector<Detection> result;
         for (const Track& track : tracks_)
             if (is_displayable(track, last_detection_pts_ms_)) result.push_back(track.smooth);
+        deduplicate_display_detections(result);
         return result;
     }
     void get_debug_stats(size_t& matched, size_t& created, size_t& lost) const {
@@ -333,6 +393,10 @@ struct SharedDetections {
 
 private:
     enum class TrackState { Tentative, Active, Shadow };
+    static constexpr float kCrossClassTrackDuplicateIoU = 0.85f;
+    static constexpr float kTrackContainmentThreshold = 0.70f;
+    static constexpr float kCrossClassContainmentThreshold = 0.50f;
+    static constexpr int kCrossClassSwitchConfirmHits = 2;
     struct Track {
         uint64_t id;
         Detection smooth;
@@ -340,6 +404,8 @@ private:
         int hits, misses;
         Detection pending{};
         int pending_hits = 0;
+        Detection cross_class_pending{};
+        int cross_class_pending_hits = 0;
         TrackState state = TrackState::Tentative;
         Detection last_measurement{};
         float filtered_center_motion = 0.0f;
@@ -356,7 +422,7 @@ private:
         float last_global_motion_dy = 0.0f;
     };
     struct Snapshot { uint64_t frame_id; int64_t pts_ms; std::vector<Detection> detections; };
-    struct Candidate { size_t track, detection; float overlap, distance, score; };
+    struct Candidate { size_t track, detection; float overlap, distance; bool cross_class_competitor; float score; };
     struct MotionSample {
         uint64_t track_id;
         Detection raw;
@@ -502,6 +568,102 @@ private:
         }
         std::cout << '\n';
         if (frame_id % 30 == 0) std::cout << std::flush;
+    }
+    static float box_area(const Detection& box) {
+        return std::max(0.0f, box.x2 - box.x1) * std::max(0.0f, box.y2 - box.y1);
+    }
+    static float intersection_area(const Detection& a, const Detection& b) {
+        const float x1 = std::max(a.x1, b.x1);
+        const float y1 = std::max(a.y1, b.y1);
+        const float x2 = std::min(a.x2, b.x2);
+        const float y2 = std::min(a.y2, b.y2);
+        return std::max(0.0f, x2 - x1) * std::max(0.0f, y2 - y1);
+    }
+    static bool center_inside(const Detection& inner, const Detection& outer) {
+        const float cx = (inner.x1 + inner.x2) * 0.5f;
+        const float cy = (inner.y1 + inner.y2) * 0.5f;
+        return cx >= outer.x1 && cx <= outer.x2 && cy >= outer.y1 && cy <= outer.y2;
+    }
+    static bool is_cross_class_competitor(const Detection& first, const Detection& second) {
+        const float smaller_area = std::min(box_area(first), box_area(second));
+        const float containment = smaller_area > 0.0f
+            ? intersection_area(first, second) / smaller_area : 0.0f;
+        const Detection& inner = box_area(first) <= box_area(second) ? first : second;
+        const Detection& outer = box_area(first) <= box_area(second) ? second : first;
+        return iou(first, second) >= kCrossClassTrackDuplicateIoU ||
+               (containment >= kCrossClassContainmentThreshold && center_inside(inner, outer));
+    }
+    static bool is_duplicate_box(const Detection& first, const Detection& second) {
+        if (first.class_id == second.class_id) {
+            const float smaller_area = std::min(box_area(first), box_area(second));
+            const float containment = smaller_area > 0.0f
+                ? intersection_area(first, second) / smaller_area : 0.0f;
+            const Detection& inner = box_area(first) <= box_area(second) ? first : second;
+            const Detection& outer = box_area(first) <= box_area(second) ? second : first;
+            return containment >= kTrackContainmentThreshold && center_inside(inner, outer);
+        }
+        return is_cross_class_competitor(first, second);
+    }
+    static void deduplicate_display_detections(std::vector<Detection>& detections) {
+        if (detections.size() < 2) return;
+        std::vector<bool> dropped(detections.size(), false);
+        for (size_t i = 0; i < detections.size(); ++i) {
+            if (dropped[i]) continue;
+            for (size_t j = i + 1; j < detections.size(); ++j) {
+                if (dropped[j] || !is_duplicate_box(detections[i], detections[j])) continue;
+                if (detections[j].score > detections[i].score) {
+                    dropped[i] = true;
+                    break;
+                }
+                dropped[j] = true;
+            }
+        }
+        size_t index = 0;
+        detections.erase(std::remove_if(detections.begin(), detections.end(),
+                                        [&dropped, &index](const Detection&) {
+                                            return dropped[index++];
+                                        }),
+                         detections.end());
+    }
+    size_t deduplicate_tracks(int64_t pts_ms) {
+        if (tracks_.size() < 2) return 0;
+        std::vector<bool> dropped(tracks_.size(), false);
+        for (size_t i = 0; i < tracks_.size(); ++i) {
+            if (dropped[i]) continue;
+            for (size_t j = i + 1; j < tracks_.size(); ++j) {
+                if (dropped[j]) continue;
+                const Detection& first = tracks_[i].smooth;
+                const Detection& second = tracks_[j].smooth;
+                if (!is_duplicate_box(first, second)) continue;
+
+                // 优先保留当前仍可显示、最近刚被检测更新、分数更高的轨迹。
+                // 这是轨迹状态合并，不是对低 IoU 的合法嵌套目标做类别无关 NMS。
+                const bool first_displayable = is_displayable(tracks_[i], pts_ms);
+                const bool second_displayable = is_displayable(tracks_[j], pts_ms);
+                bool keep_second = false;
+                if (first_displayable != second_displayable) {
+                    keep_second = second_displayable;
+                } else if (tracks_[i].last_detection_pts_ms != tracks_[j].last_detection_pts_ms) {
+                    keep_second = tracks_[j].last_detection_pts_ms > tracks_[i].last_detection_pts_ms;
+                } else if (tracks_[i].smooth.score != tracks_[j].smooth.score) {
+                    keep_second = tracks_[j].smooth.score > tracks_[i].smooth.score;
+                } else {
+                    keep_second = tracks_[j].hits > tracks_[i].hits;
+                }
+                if (keep_second) {
+                    dropped[i] = true;
+                    break;
+                }
+                dropped[j] = true;
+            }
+        }
+        const size_t before = tracks_.size();
+        tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(),
+                                     [index = size_t{0}, &dropped](const Track&) mutable {
+                                         return dropped[index++];
+                                     }),
+                       tracks_.end());
+        return before - tracks_.size();
     }
     static float iou(const Detection& a, const Detection& b) {
         float x1=std::max(a.x1,b.x1), y1=std::max(a.y1,b.y1), x2=std::min(a.x2,b.x2), y2=std::min(a.y2,b.y2);

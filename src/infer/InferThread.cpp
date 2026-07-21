@@ -29,10 +29,12 @@ InferThread::InferThread(const ModelConfig& model_cfg,
                          const ImageProcessingConfig& image_cfg,
                          BlockingQueue<Frame>& in_queue,
                          BlockingQueue<std::string>& mqtt_queue,
-                         SharedDetections& shared_dets)
+                         SharedDetections& shared_dets,
+                         NpuInferenceSchedulerPtr npu_scheduler)
     : cfg_(model_cfg), det_cfg_(det_cfg),
       image_cfg_(image_cfg),
-      in_queue_(in_queue), mqtt_queue_(mqtt_queue), shared_dets_(shared_dets) {}
+      in_queue_(in_queue), mqtt_queue_(mqtt_queue), shared_dets_(shared_dets),
+      npu_scheduler_(std::move(npu_scheduler)) {}
 
 // 析构时兜底调用 stop()，保证即使调用方忘记手动 stop，线程和 RKNN 资源也不会泄漏。
 InferThread::~InferThread() { stop(); }
@@ -43,6 +45,20 @@ InferThread::~InferThread() { stop(); }
 // 3) 初始化上报时间戳、置 running_=true，再起 run() 所在的工作线程。
 // 线程起来之后 start() 立即返回，不等待第一帧推理完成。
 void InferThread::start() {
+    if (npu_scheduler_) {
+        if (!npu_scheduler_->is_running()) {
+            throw std::runtime_error("InferThread: NPU scheduler is not running");
+        }
+        last_report_time_ = std::chrono::steady_clock::now();
+        running_ = true;
+        npu_scheduler_->register_channel(
+            {cfg_.channel_id, cfg_.target_infer_fps, cfg_.npu_weight},
+            [this](const NpuInferenceResult& result) { on_scheduled_result(result); });
+        scheduler_registered_ = true;
+        thread_ = std::thread(&InferThread::run_scheduled, this);
+        return;
+    }
+
     YoloConfig yolo_cfg;
     yolo_cfg.conf_threshold   = cfg_.conf_threshold;
     yolo_cfg.iou_threshold    = cfg_.iou_threshold;
@@ -72,16 +88,59 @@ void InferThread::start() {
 void InferThread::stop() {
     running_ = false;
     if (thread_.joinable()) thread_.join();
+    if (npu_scheduler_ && scheduler_registered_) {
+        npu_scheduler_->unregister_channel(cfg_.channel_id);
+        scheduler_registered_ = false;
+        return;
+    }
     if (input_mem_)  { rknn_destroy_mem(ctx_, input_mem_);  input_mem_  = nullptr; }
     if (ctx_)        { rknn_destroy(ctx_); ctx_ = 0; }
+}
+
+void InferThread::run_scheduled() {
+    while (running_) {
+        Frame frame;
+        if (!in_queue_.pop(frame, 200)) continue;
+        Frame fresher;
+        while (in_queue_.pop(fresher, 0)) frame = std::move(fresher);
+        if (!npu_scheduler_->submit(cfg_.channel_id, std::move(frame)) && running_) {
+            std::cerr << "[Infer] scheduler submit rejected channel=" << cfg_.channel_id << "\n";
+        }
+    }
+}
+
+void InferThread::on_scheduled_result(const NpuInferenceResult& result) {
+    if (!running_ || !result.success) return;
+    shared_dets_.update(result.detections, result.frame_id, result.pts_ms,
+                        result.frame_width, result.frame_height);
+    std::cout << "[Infer] channel=" << cfg_.channel_id
+              << " scheduler cpu:" << result.preprocess_ms
+              << " cpy:" << result.input_sync_ms
+              << " npu:" << result.npu_ms
+              << " cnv:" << result.output_postprocess_ms
+              << " total:" << (result.preprocess_ms + result.input_sync_ms +
+                                result.npu_ms + result.output_postprocess_ms)
+              << " ms objs:" << result.detections.size() << "\n" << std::flush;
+
+    const auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::seconds>(now - last_report_time_).count() <
+        det_cfg_.report_interval_sec) {
+        return;
+    }
+    last_report_time_ = now;
+    const std::string key = summary_key(result.detections);
+    if (key != last_summary_key_) {
+        last_summary_key_ = key;
+        mqtt_queue_.push(summarize(result.detections, nullptr, nullptr), 100);
+    }
 }
 
 // 把 cfg_.path 指向的 .rknn 文件读进内存，初始化 RKNN 运行时，并完成三件事：
 // (a) 开 SRAM + 绑定三个 NPU 核心提升吞吐；
 // (b) 查询并校验模型输出张量布局：decoded模式识别box/class，rockchip_dfl模式
 //     校验三组DFL/class/score-sum共九个输出；
-// (c) 预分配 zero-copy 输入用的 NPU DMA 内存并绑定，后续 run() 直接 memcpy 进去，
-//     省掉 rknn_inputs_set 那次额外拷贝。
+// (c) 预分配 zero-copy 输入用的 NPU DMA 内存并绑定；RGA/CPU 预处理结果
+//     直接写入这块内存，避免再从临时 input_buf memcpy 一次。
 // 任意一步出错就打印日志并返回 false，调用方 start() 会因此抛异常终止启动。
 bool InferThread::load_model() {
     std::ifstream f(cfg_.path, std::ios::binary | std::ios::ate);
@@ -265,14 +324,16 @@ static void resize_rgb(const uint8_t* src, int sw, int sh,
 // RGA 硬件一次完成 YUV (YUYV 或 NV12) -> RGB888 + 缩放（整图拉伸，不做 letterbox）。
 // 返回 false 时 dst 内容不可信，调用方应回退到 CPU 路径。
 static bool rga_yuv_to_rgb_resize(const uint8_t* src, int sw, int sh, PixelFormat fmt,
-                                   uint8_t* dst, int dw, int dh) {
+                                   const TileRect* region, uint8_t* dst, int dw, int dh) {
     int rga_fmt = (fmt == PixelFormat::NV12) ? RK_FORMAT_YCbCr_420_SP : RK_FORMAT_YUYV_422;
     rga_buffer_t src_buf = wrapbuffer_virtualaddr(
         const_cast<uint8_t*>(src), sw, sh, rga_fmt);
     rga_buffer_t dst_buf = wrapbuffer_virtualaddr(dst, dw, dh, RK_FORMAT_RGB_888);
     rga_buffer_t pat_buf{};
 
-    im_rect srect{0, 0, sw, sh};
+    const TileRect full{0, 0, sw, sh};
+    const TileRect& source = region ? *region : full;
+    im_rect srect{source.x, source.y, source.width, source.height};
     im_rect drect{0, 0, dw, dh};
     im_rect prect{0, 0, 0, 0};
 
@@ -295,8 +356,10 @@ struct LetterboxGeometry {
 static LetterboxGeometry letterbox_geometry(int sw, int sh, int dw, int dh) {
     float scale = std::min(static_cast<float>(dw) / sw,
                            static_cast<float>(dh) / sh);
-    int width = static_cast<int>(std::round(sw * scale));
-    int height = static_cast<int>(std::round(sh * scale));
+    // RGA RGB 目标矩形要求偶数起点和尺寸；CPU 回退和后处理共用此几何，
+    // 因而对动态联合 ROI 的坐标回映仍保持一致。
+    int width = std::max(2, static_cast<int>(std::round(sw * scale)) & ~1);
+    int height = std::max(2, static_cast<int>(std::round(sh * scale)) & ~1);
     return {width, height, (dw - width) / 2, (dh - height) / 2};
 }
 
@@ -320,15 +383,17 @@ static void resize_rgb_letterbox(const uint8_t* src, int sw, int sh,
 // RGA 硬件一次完成 YUV (YUYV 或 NV12) -> RGB888 + 缩放并补 114 灰边（Letterbox）。
 // 返回 false 时 dst 内容不可信，调用方应回退到 CPU 路径。
 static bool rga_yuv_to_rgb_letterbox(const uint8_t* src, int sw, int sh, PixelFormat fmt,
-                                     uint8_t* dst, int dw, int dh) {
-    const auto box = letterbox_geometry(sw, sh, dw, dh);
+                                     const TileRect* region, uint8_t* dst, int dw, int dh) {
+    const TileRect full{0, 0, sw, sh};
+    const TileRect& source = region ? *region : full;
+    const auto box = letterbox_geometry(source.width, source.height, dw, dh);
     std::fill(dst, dst + static_cast<size_t>(dw) * dh * 3, 114);
     int rga_fmt = (fmt == PixelFormat::NV12) ? RK_FORMAT_YCbCr_420_SP : RK_FORMAT_YUYV_422;
     rga_buffer_t src_buf = wrapbuffer_virtualaddr(
         const_cast<uint8_t*>(src), sw, sh, rga_fmt);
     rga_buffer_t dst_buf = wrapbuffer_virtualaddr(dst, dw, dh, RK_FORMAT_RGB_888);
     rga_buffer_t pat_buf{};
-    im_rect srect{0, 0, sw, sh};
+    im_rect srect{source.x, source.y, source.width, source.height};
     im_rect drect{box.left, box.top, box.width, box.height};
     im_rect prect{0, 0, 0, 0};
     IM_STATUS ret = improcess(src_buf, dst_buf, pat_buf, srect, drect, prect, 0);
@@ -364,6 +429,7 @@ static json summarize_objects(const std::vector<Detection>& dets) {
 // 去重（跟 summary_key() 比较）是 run() 调用它之后才做的事。
 std::string InferThread::summarize(const std::vector<Detection>& dets, const Thumbnail* thumbnail, const std::vector<RoiEvent>* events) {
     json msg;
+    msg["channel_id"] = cfg_.channel_id;
     msg["timestamp"] = static_cast<int64_t>(std::time(nullptr));
     msg["objects"]   = summarize_objects(dets);
     if (thumbnail && !thumbnail->data.empty()) {
@@ -398,7 +464,8 @@ void InferThread::run() {
     //step 就是"每隔多少帧做一次真正的 NPU 推理"，用来给推理降频。
     const int step = std::max(1, cfg_.infer_every_n_frames);
     std::vector<uint8_t> rgb_buf;
-    std::vector<uint8_t> input_buf(model_width_ * model_height_ * 3);
+    // 预处理目标直接使用 RKNN 输入 DMA 内存，避免每帧再复制约 1.2MB。
+    auto* input_buf = static_cast<uint8_t*>(input_mem_->virt_addr);
     std::vector<Detection> last_detections;
     int frame_idx = 0;
     int rga_fail_count = 0;
@@ -437,20 +504,65 @@ void InferThread::run() {
                     auto tiles = tiling_task.make_tiles(frame.width, frame.height, temp_regions.front());
                     if (!tiles.empty()) {
                         std::cout << "[Infer] Running ROI Tiling with " << tiles.size() << " tiles.\n" << std::flush;
-                        last_detections.clear();
+                        std::vector<TiledDetection> tiled_detections;
                         for (const auto& tile : tiles) {
-                            Frame tile_frame = tiling_task.crop(frame, tile);
-                            auto tile_detections = infer_once(tile_frame);
+                            auto tile_detections = infer_once(frame, &tile);
                             for (auto& d : tile_detections) {
                                 d.x1 += tile.x; d.x2 += tile.x;
                                 d.y1 += tile.y; d.y2 += tile.y;
+                                tiled_detections.push_back({std::move(d), tile});
                             }
-                            last_detections.insert(last_detections.end(), tile_detections.begin(), tile_detections.end());
+                        }
+                        const auto joint_recheck_regions = tiling_task.make_joint_recheck_regions(
+                            tiled_detections, frame.width, frame.height);
+                        auto roi_candidates = tiling_task.merge_boundary_detections(std::move(tiled_detections));
+                        if (tiling_task.last_boundary_merge_count() > 0) {
+                            std::cout << "[Infer] ROI boundary merges="
+                                      << tiling_task.last_boundary_merge_count() << "\n" << std::flush;
+                        }
+                        if (!joint_recheck_regions.empty()) {
+                            std::cout << "[Infer] ROI overlap candidates=" << joint_recheck_regions.size()
+                                      << ", running joint-ROI recheck.\n"
+                                      << std::flush;
+                            // 复检 ROI 由跨缝候选对联合生成；完整框会在进入 Tracker 前
+                            // 替换 tile 半框，避免同一物体建立两条轨迹。
+                            std::vector<TiledDetection> joint_detections;
+                            for (const TileRect& joint_roi : joint_recheck_regions) {
+                                auto rechecked = infer_once(frame, &joint_roi);
+                                for (auto& d : rechecked) {
+                                    d.x1 += joint_roi.x; d.x2 += joint_roi.x;
+                                    d.y1 += joint_roi.y; d.y2 += joint_roi.y;
+                                }
+                                for (auto& d : rechecked) {
+                                    joint_detections.push_back({std::move(d), joint_roi,
+                                        TiledDetection::Origin::JointRecheck});
+                                }
+                            }
+                            const size_t suppressed =
+                                tiling_task.suppress_tile_duplicates(roi_candidates,
+                                                                     joint_detections);
+                            if (suppressed > 0) {
+                                std::cout << "[Infer] joint-ROI suppressed tile duplicates="
+                                          << suppressed << "\n" << std::flush;
+                            }
+                            roi_candidates.insert(roi_candidates.end(),
+                                                   joint_detections.begin(),
+                                                   joint_detections.end());
+                        }
+                        roi_candidates = tiling_task.select_exclusive_candidates(std::move(roi_candidates));
+                        if (tiling_task.last_exclusive_suppression_count() > 0) {
+                            std::cout << "[Infer] ROI exclusive suppression="
+                                      << tiling_task.last_exclusive_suppression_count() << "\n" << std::flush;
+                        }
+                        last_detections = TilingTask::detections_only(std::move(roi_candidates));
+                        last_detections = tiling_task.merge(std::move(last_detections));
+                        if (tiling_task.last_cross_class_duplicate_count() > 0) {
+                            std::cout << "[Infer] cross-class near-duplicate suppression="
+                                      << tiling_task.last_cross_class_duplicate_count()
+                                      << "\n" << std::flush;
                         }
                         // Apply ROI filter to track/dwell events and filter outliers
                         last_detections = roi_filter.filter(last_detections, frame.width, frame.height, frame.timestamp_ms, &pending_events);
-                        // Global NMS duplicate merge
-                        last_detections = tiling_task.merge(std::move(last_detections));
                         done_tiling = true;
                     }
                 }
@@ -460,14 +572,14 @@ void InferThread::run() {
                 using clk = std::chrono::steady_clock;
                 auto t0 = clk::now();
 
-                // YUYV/NV12 → RGB888 + 缩放（推理专用，编码路径已不再使用此 buf）。
+                // YUYV/NV12 → RGB888 + 缩放，直接写入 RKNN 输入 DMA 内存。
                 // RGA 硬件优先，失败时回退到 CPU 路径。
                 bool use_letterbox = cfg_.output_layout == "rockchip_dfl";
                 bool rga_ok = use_letterbox
                     ? rga_yuv_to_rgb_letterbox(frame.raw_data.data(), frame.width, frame.height, frame.pixel_format,
-                                                input_buf.data(), model_width_, model_height_)
+                                                nullptr, input_buf, model_width_, model_height_)
                     : rga_yuv_to_rgb_resize(frame.raw_data.data(), frame.width, frame.height, frame.pixel_format,
-                                             input_buf.data(), model_width_, model_height_);
+                                             nullptr, input_buf, model_width_, model_height_);
                 if (!rga_ok) {
                     rgb_buf.resize(frame.width * frame.height * 3);
                     if (frame.pixel_format == PixelFormat::NV12) {
@@ -477,10 +589,10 @@ void InferThread::run() {
                     }
                     if (use_letterbox)
                         resize_rgb_letterbox(rgb_buf.data(), frame.width, frame.height,
-                                             input_buf.data(), model_width_, model_height_);
+                                             input_buf, model_width_, model_height_);
                     else
                         resize_rgb(rgb_buf.data(), frame.width, frame.height,
-                                   input_buf.data(), model_width_, model_height_);
+                                   input_buf, model_width_, model_height_);
                     if (++rga_fail_count % 30 == 1) {
                         std::cerr << "[Infer] RGA path failed, using CPU fallback ("
                                   << rga_fail_count << " times)\n" << std::flush;
@@ -488,8 +600,12 @@ void InferThread::run() {
                 }
                 auto t1 = clk::now();
 
-                // Zero-copy：直接 memcpy 进 NPU 的 DMA 输入缓冲区
-                memcpy(input_mem_->virt_addr, input_buf.data(), input_buf.size());
+                // RGA/CPU 已经直接写入 RKNN 输入内存；同步 cache 后再启动 NPU。
+                // rknn_set_io_mem 文档要求用户在 rknn_run 前保证输入 cache 一致。
+                const int sync_ret = rknn_mem_sync(ctx_, input_mem_, RKNN_MEMORY_SYNC_TO_DEVICE);
+                if (sync_ret != RKNN_SUCC) {
+                    std::cerr << "[Infer] rknn_mem_sync(input) failed: " << sync_ret << "\n";
+                }
                 auto t2 = clk::now();
 
                 int run_ret = rknn_run(ctx_, nullptr);
@@ -533,7 +649,8 @@ void InferThread::run() {
                 auto t4 = clk::now();
 
                 auto ms = [](auto a, auto b){ return std::chrono::duration<float,std::milli>(b-a).count(); };
-                std::cout << "[Infer] cpu:" << ms(t0,t1) << " cpy:" << ms(t1,t2)
+                std::cout << "[Infer] channel=" << cfg_.channel_id
+                          << " cpu:" << ms(t0,t1) << " cpy:" << ms(t1,t2)
                           << " npu:" << ms(t2,t3) << " cnv:" << ms(t3,t4)
                           << " total:" << ms(t0,t4) << " ms objs:" << last_detections.size() << "\n" << std::flush;
 
@@ -554,7 +671,8 @@ void InferThread::run() {
                 size_t matched = 0, created = 0, lost = 0;
                 shared_dets_.get_debug_stats(matched, created, lost);
                 const uint64_t reversal_damped = shared_dets_.get_reversal_damped_total();
-                std::cout << "[TrackStats] infer_frame=" << frame.frame_id
+                std::cout << "[TrackStats] channel=" << cfg_.channel_id
+                          << " infer_frame=" << frame.frame_id
                           << " infer_pts_ms=" << frame.pts_ms
                           << " infer_queue=" << in_queue_.size()
                           << " matched=" << matched << " created=" << created
@@ -579,26 +697,37 @@ void InferThread::run() {
     }
 }
 
-std::vector<Detection> InferThread::infer_once(const Frame& frame) {
-    std::vector<uint8_t> input(static_cast<size_t>(model_width_)*model_height_*3);
+std::vector<Detection> InferThread::infer_once(const Frame& frame, const TileRect* region) {
+    // ROI Tiling 与普通推理共用同一块 RKNN 输入 DMA 内存，避免临时输入缓冲区复制。
+    auto* input = static_cast<uint8_t*>(input_mem_->virt_addr);
     bool letterbox = cfg_.output_layout == "rockchip_dfl";
+    const int source_width = region ? region->width : frame.width;
+    const int source_height = region ? region->height : frame.height;
     bool ok = letterbox
-        ? rga_yuv_to_rgb_letterbox(frame.raw_data.data(), frame.width, frame.height, frame.pixel_format, input.data(), model_width_, model_height_)
-        : rga_yuv_to_rgb_resize(frame.raw_data.data(), frame.width, frame.height, frame.pixel_format, input.data(), model_width_, model_height_);
+        ? rga_yuv_to_rgb_letterbox(frame.raw_data.data(), frame.width, frame.height, frame.pixel_format,
+                                   region, input, model_width_, model_height_)
+        : rga_yuv_to_rgb_resize(frame.raw_data.data(), frame.width, frame.height, frame.pixel_format,
+                                region, input, model_width_, model_height_);
     if (!ok) {
-        std::vector<uint8_t> rgb_buf(frame.width * frame.height * 3);
+        if (region) {
+            TilingTask tiling_task(TilingConfig{true, 1, 1, 0.0f, 0.45f});
+            Frame tile_frame = tiling_task.crop(frame, *region);
+            return infer_once(tile_frame, nullptr);
+        }
+        std::vector<uint8_t> rgb_buf(source_width * source_height * 3);
         if (frame.pixel_format == PixelFormat::NV12) {
-            nv12_to_rgb(frame.raw_data.data(), rgb_buf.data(), frame.width, frame.height);
+            nv12_to_rgb(frame.raw_data.data(), rgb_buf.data(), source_width, source_height);
         } else {
-            yuyv_to_rgb(frame.raw_data.data(), rgb_buf.data(), frame.width, frame.height);
+            yuyv_to_rgb(frame.raw_data.data(), rgb_buf.data(), source_width, source_height);
         }
         if (letterbox) {
-            resize_rgb_letterbox(rgb_buf.data(), frame.width, frame.height, input.data(), model_width_, model_height_);
+            resize_rgb_letterbox(rgb_buf.data(), source_width, source_height, input, model_width_, model_height_);
         } else {
-            resize_rgb(rgb_buf.data(), frame.width, frame.height, input.data(), model_width_, model_height_);
+            resize_rgb(rgb_buf.data(), source_width, source_height, input, model_width_, model_height_);
         }
     }
-    std::memcpy(input_mem_->virt_addr, input.data(), input.size());
+    const int sync_ret = rknn_mem_sync(ctx_, input_mem_, RKNN_MEMORY_SYNC_TO_DEVICE);
+    if (sync_ret != RKNN_SUCC) return {};
     if (rknn_run(ctx_, nullptr) != RKNN_SUCC) return {};
     std::vector<rknn_output> outputs(static_cast<size_t>(n_output_));
     for (int i=0;i<n_output_;++i) { outputs[i].index=i; outputs[i].want_float=cfg_.output_layout=="decoded"; outputs[i].is_prealloc=0; }
@@ -606,8 +735,8 @@ std::vector<Detection> InferThread::infer_once(const Frame& frame) {
     if (rknn_outputs_get(ctx_,n_output_,outputs.data(),nullptr)==RKNN_SUCC) {
         if (cfg_.output_layout=="decoded") {
             detections=decoded_postprocess_->process(static_cast<const float*>(outputs[box_output_idx_].buf),
-                static_cast<const float*>(outputs[cls_output_idx_].buf),8400,frame.width,frame.height);
-        } else detections=rockchip_postprocess_->process(outputs,output_attrs_,model_width_,model_height_,frame.width,frame.height);
+                static_cast<const float*>(outputs[cls_output_idx_].buf),8400,source_width,source_height);
+        } else detections=rockchip_postprocess_->process(outputs,output_attrs_,model_width_,model_height_,source_width,source_height);
         rknn_outputs_release(ctx_,n_output_,outputs.data());
     }
     return detections;

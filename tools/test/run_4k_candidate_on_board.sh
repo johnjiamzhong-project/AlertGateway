@@ -14,6 +14,8 @@ CONFIG="${CONFIG:-config/config_4k_candidate_20260719.json}"
 INPUT_URL="${INPUT_URL:-rtmp://192.168.0.168/live/testsrc2}"
 RESULT_URL="${RESULT_URL:-rtmp://192.168.0.168/live/alertgateway}"
 SRS_API="${SRS_API:-http://192.168.0.168:1985/api/v1/streams/}"
+SRS_HOST="${SRS_HOST:-192.168.0.168}"
+SRS_RTMP_PORT="${SRS_RTMP_PORT:-1935}"
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
 LOG_DIR="${LOG_DIR:-/tmp/alertgateway_4k_${RUN_ID}}"
 PUSH_LOG="$LOG_DIR/publisher.log"
@@ -45,7 +47,19 @@ fetch_srs() {
 }
 stream_active() {
   local stream_name="$1" api_file="$2"
-  grep -Eq "\"name\":\"${stream_name}\".*\"active\":true" "$api_file"
+  python3 - "$api_file" "$stream_name" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+streams = data if isinstance(data, list) else data.get("streams", [])
+sys.exit(0 if any(
+    item.get("name") == sys.argv[2]
+    and (item.get("active") or item.get("publish", {}).get("active"))
+    for item in streams
+) else 1)
+PY
 }
 wait_stream() {
   local stream_name="$1" timeout_sec="$2" api_file="$3"
@@ -108,7 +122,7 @@ trap cleanup EXIT
 
 [[ "$RUN_SEC" =~ ^[1-9][0-9]*$ ]] || fail "运行秒数必须是正整数，当前值：$RUN_SEC"
 [[ -f "$VIDEO" ]] || fail "找不到输入视频：$VIDEO"
-for command in ffmpeg ffprobe curl ssh; do command -v "$command" >/dev/null || fail "缺少命令：$command"; done
+for command in ffmpeg ffprobe curl python3 ssh scp; do command -v "$command" >/dev/null || fail "缺少命令：$command"; done
 
 log "=== 4K 候选一键验证 ==="
 log "视频：$VIDEO"
@@ -121,12 +135,14 @@ ffprobe -v error -select_streams v:0 \
   -show_entries stream=codec_name,width,height,r_frame_rate -of default=noprint_wrappers=1 "$VIDEO" \
   || fail "ffprobe 无法读取输入视频"
 
-if ! fetch_srs "$API_BEFORE"; then
-  fail "SRS API 不可访问：$SRS_API。请先检查 Windows SRS 是否已启动且 1935/1985 正在监听。"
-fi
-log "SRS API 可访问。"
+log "检查 SRS 前置条件；SRS 只允许手动启动，测试脚本不会启动或重启它。"
+bash tools/test/check_srs_manual.sh "$SRS_API" "$SRS_HOST" "$SRS_RTMP_PORT" "$API_BEFORE" \
+  || fail "SRS 未就绪，未启动本次测试。"
 
-log "检查板端二进制、候选配置、基础配置和候选 RKNN。"
+log "部署并检查板端二进制、候选配置、基础配置和候选 RKNN。"
+ssh -o BatchMode=yes -o ConnectTimeout=5 "$BOARD_HOST" \
+  "mkdir -p '$BOARD_DIR/config'"
+scp "$CONFIG" "$BOARD_HOST:$BOARD_DIR/$CONFIG" >/dev/null
 ssh -o BatchMode=yes -o ConnectTimeout=5 "$BOARD_HOST" \
   "cd $BOARD_DIR && test -x AlertGateway && test -f '$CONFIG' && test -f config/config_4k_8mbps.json && test -f model/yolov8s_4k_photos_head_20e_20260718_finaltest_int8.rknn" \
   || fail "板端缺少候选运行文件，或 SSH 不可达：$BOARD_HOST"
@@ -137,6 +153,7 @@ fi
 
 log "启动输入发布，等待 SRS 出现 live/testsrc2。"
 timeout --preserve-status --signal=INT "$((RUN_SEC + 30))s" \
+  env SRS_PREFLIGHT_ALREADY_CHECKED=1 \
   bash tools/test/push_testsrc2_4k_to_srs.sh "$VIDEO" "$INPUT_URL" 0 >"$PUSH_LOG" 2>&1 &
 PUSH_PID=$!
 if ! wait_stream "testsrc2" 20 "$API_INPUT"; then

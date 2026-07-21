@@ -46,11 +46,14 @@ set(RGA_LIB ${CMAKE_SOURCE_DIR}/third_party/rga/lib/librga.so.2.1.0)
 # ── Sources ───────────────────────────────────────────────────────────────────
 set(SOURCES
     src/main.cpp
+    src/app/ChannelPipeline.cpp
     src/capture/CaptureThread.cpp
     src/capture/PullStreamThread.cpp
     src/infer/RoiFilter.cpp
     src/infer/TilingTask.cpp
     src/infer/ThumbnailTask.cpp
+    src/infer/NpuInferenceScheduler.cpp
+    src/infer/RknnNpuExecutor.cpp
     src/infer/InferThread.cpp
     src/infer/RockchipYoloPostprocess.cpp
     src/infer/YoloPostprocess.cpp
@@ -116,6 +119,7 @@ if(BUILD_INFER_CAMERA_SMOKE)
         src/infer/RoiFilter.cpp
         src/infer/TilingTask.cpp
         src/infer/ThumbnailTask.cpp
+        src/infer/NpuInferenceScheduler.cpp
         src/infer/InferThread.cpp
         src/infer/RockchipYoloPostprocess.cpp
         src/infer/YoloPostprocess.cpp
@@ -141,4 +145,13 @@ if(BUILD_IMAGE_PROCESSING_SMOKE)
         src/infer/TilingTask.cpp
         src/infer/ThumbnailTask.cpp)
     target_include_directories(image_processing_smoke PRIVATE ${CMAKE_SOURCE_DIR}/src)
+endif()
+
+option(BUILD_NPU_SCHEDULER_SMOKE "Build the host-safe NPU scheduler algorithm smoke test" OFF)
+if(BUILD_NPU_SCHEDULER_SMOKE)
+    add_executable(npu_scheduler_smoke
+        tools/benchmark/npu_scheduler_smoke.cpp
+        src/infer/NpuInferenceScheduler.cpp)
+    target_include_directories(npu_scheduler_smoke PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(npu_scheduler_smoke PRIVATE pthread)
 endif()
