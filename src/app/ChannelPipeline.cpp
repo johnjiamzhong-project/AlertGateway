@@ -58,6 +58,9 @@ TrackerConfig tracker_config_from(const ModelConfig& model) {
 }
 
 void validate_model_config(const ModelConfig& model) {
+    if (model.target_infer_fps < 0 || model.npu_weight < 1) {
+        throw std::runtime_error("Config error: model.target_infer_fps must be >= 0 and model.npu_weight >= 1");
+    }
     if (model.track_display_mode < 0 || model.track_display_mode > 1) {
         throw std::runtime_error("Config error: model.track_display_mode must be 0 (raw) or 1 (adaptive)");
     }
@@ -81,8 +84,10 @@ void validate_model_config(const ModelConfig& model) {
 
 }  // namespace
 
-ChannelPipeline::ChannelPipeline(std::string channel_id, json config)
-    : channel_id_(std::move(channel_id)), config_(std::move(config)) {
+ChannelPipeline::ChannelPipeline(std::string channel_id, json config,
+                                 NpuInferenceSchedulerPtr npu_scheduler)
+    : channel_id_(std::move(channel_id)), config_(std::move(config)),
+      npu_scheduler_(std::move(npu_scheduler)) {
     build();
 }
 
@@ -99,6 +104,8 @@ void ChannelPipeline::build() {
     int source_width = 640;
     int source_height = 480;
     int source_fps = 15;
+    int processing_width = 640;
+    int processing_height = 480;
     CameraConfig camera_cfg{};
     PullStreamConfig pull_cfg{};
 
@@ -123,8 +130,18 @@ void ChannelPipeline::build() {
             }
             pull_cfg.width = source_width;
             pull_cfg.height = source_height;
+            pull_cfg.output_width = source.value("output_width", source_width);
+            pull_cfg.output_height = source.value("output_height", source_height);
+            if (pull_cfg.output_width <= 0 || pull_cfg.output_height <= 0 ||
+                (pull_cfg.output_width & 1) || (pull_cfg.output_height & 1)) {
+                throw std::runtime_error(
+                    "Config error: source.output_width/output_height must be positive even values");
+            }
+            processing_width = pull_cfg.output_width;
+            processing_height = pull_cfg.output_height;
             pull_cfg.fps = source_fps;
             pull_cfg.reconnect_sec = source.value("reconnect_sec", 5);
+            pull_cfg.hardware_decode = source.value("hardware_decode", false);
         } else {
             camera_cfg.channel_id = channel_id_;
             camera_cfg.device = source.at("device").get<std::string>();
@@ -144,6 +161,10 @@ void ChannelPipeline::build() {
         source_fps = camera_cfg.fps;
     } else {
         throw std::runtime_error("Config error: no source or camera node found");
+    }
+    if (source_type != "pull_stream") {
+        processing_width = source_width;
+        processing_height = source_height;
     }
 
     const auto& model = config_.at("model");
@@ -186,6 +207,8 @@ void ChannelPipeline::build() {
     model_cfg.track_global_motion_center_filter = model.value("track_global_motion_center_filter", false);
     model_cfg.track_global_motion_smoothing_alpha = model.value("track_global_motion_smoothing_alpha", 0.25f);
     model_cfg.track_global_motion_min_tracks = model.value("track_global_motion_min_tracks", 3);
+    model_cfg.target_infer_fps = model.value("target_infer_fps", 0);
+    model_cfg.npu_weight = model.value("npu_weight", 1);
     validate_model_config(model_cfg);
 
     DetectionConfig detection_cfg{};
@@ -241,8 +264,8 @@ void ChannelPipeline::build() {
     }
     EncodeConfig encode_cfg{};
     encode_cfg.channel_id = channel_id_;
-    encode_cfg.width = source_width;
-    encode_cfg.height = source_height;
+    encode_cfg.width = processing_width;
+    encode_cfg.height = processing_height;
     encode_cfg.fps = source_fps;
     encode_cfg.bitrate_kbps = stream.value("bitrate_kbps", 2000);
     encode_cfg.draw_detection_labels = stream.value("draw_detection_labels", true);
@@ -257,8 +280,8 @@ void ChannelPipeline::build() {
     stream_cfg.channel_id = channel_id_;
     stream_cfg.sink = sink;
     stream_cfg.rtmp_url = output_target;
-    stream_cfg.width = source_width;
-    stream_cfg.height = source_height;
+    stream_cfg.width = processing_width;
+    stream_cfg.height = processing_height;
     stream_cfg.fps = source_fps;
 
     const auto& mqtt = config_.at("mqtt");
@@ -281,7 +304,8 @@ void ChannelPipeline::build() {
         video_source_ = std::make_unique<CaptureThread>(camera_cfg, *enc_queue_, *infer_queue_, frame_pool_);
     }
     infer_ = std::make_unique<InferThread>(model_cfg, detection_cfg, image_cfg,
-                                           *infer_queue_, *mqtt_queue_, *shared_dets_);
+                                           *infer_queue_, *mqtt_queue_, *shared_dets_,
+                                           npu_scheduler_);
     encoder_ = std::make_unique<EncodeThread>(encode_cfg, *enc_queue_, *stream_queue_, *shared_dets_);
     streamer_ = std::make_unique<StreamThread>(stream_cfg, *stream_queue_);
     mqtter_ = std::make_unique<MqttThread>(mqtt_cfg, *mqtt_queue_);

@@ -3,6 +3,7 @@
 #include <iostream>
 #include <cstring>
 #include <chrono>
+#include <algorithm>
 
 const char* stream_sink_name(StreamSinkType sink) {
     switch (sink) {
@@ -72,7 +73,9 @@ bool StreamThread::open_rtmp() {
     st->codecpar->codec_id    = AV_CODEC_ID_H264;
     st->codecpar->width       = cfg_.width;
     st->codecpar->height      = cfg_.height;
-    st->time_base             = AVRational{1, cfg_.fps};
+    // Packet timestamps are carried in milliseconds so that a temporarily
+    // overloaded pipeline does not advertise a false fixed-FPS timeline.
+    st->time_base             = AVRational{1, 1000};
 
     AVDictionary* opts = nullptr;
     if (cfg_.sink == StreamSinkType::FixedRtmp) {
@@ -97,6 +100,8 @@ void StreamThread::close_rtmp() {
         header_written_ = false;
         extradata_set_  = false;
         pkt_idx_ = 0;
+        stream_pts_origin_ms_ = -1;
+        last_stream_pts_ms_ = -1;
         // sps_/pps_ 保留：MPP 编码器只在首帧关键帧带 SPS/PPS，
         // 重连后直接用缓存值写 header，不用等下一个关键帧
     }
@@ -206,8 +211,8 @@ bool StreamThread::write_packet(const EncodedPacket& ep) {
     }
     if (avcc.empty()) return true;  // 这帧全是SPS/PPS，没有实际画面数据，不用写
 
-    // pts/dts 用 pkt_idx_ 线性递增(按帧计数，不是按时间)，靠 av_packet_rescale_ts
-    // 从 {1,fps} 这个时间基换算成 video_st_->time_base 要求的单位
+    // Use the MPP/source timestamp. A fixed pkt_idx_ would claim 30 FPS even
+    // when PullStreamThread can only produce 12--17 FPS under load.
     AVPacket* pkt = av_packet_alloc();
     if (!pkt) {
         std::cerr << "StreamThread: av_packet_alloc failed\n";
@@ -215,9 +220,15 @@ bool StreamThread::write_packet(const EncodedPacket& ep) {
     }
     pkt->data  = avcc.data();
     pkt->size  = static_cast<int>(avcc.size());
-    pkt->pts   = pkt->dts = pkt_idx_++;
+    if (stream_pts_origin_ms_ < 0) stream_pts_origin_ms_ = ep.pts;
+    int64_t relative_pts_ms = std::max<int64_t>(0, ep.pts - stream_pts_origin_ms_);
+    if (last_stream_pts_ms_ >= 0 && relative_pts_ms <= last_stream_pts_ms_) {
+        relative_pts_ms = last_stream_pts_ms_ + std::max<int64_t>(1, 1000 / cfg_.fps);
+    }
+    last_stream_pts_ms_ = relative_pts_ms;
+    pkt->pts   = pkt->dts = relative_pts_ms;
     pkt->flags = ep.is_keyframe ? AV_PKT_FLAG_KEY : 0;
-    av_packet_rescale_ts(pkt, AVRational{1, cfg_.fps}, video_st_->time_base);
+    av_packet_rescale_ts(pkt, AVRational{1, 1000}, video_st_->time_base);
     int ret = av_write_frame(fmt_ctx_, pkt);
     av_packet_free(&pkt);
     if (ret < 0) return false;

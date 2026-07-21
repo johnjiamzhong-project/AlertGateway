@@ -29,10 +29,12 @@ InferThread::InferThread(const ModelConfig& model_cfg,
                          const ImageProcessingConfig& image_cfg,
                          BlockingQueue<Frame>& in_queue,
                          BlockingQueue<std::string>& mqtt_queue,
-                         SharedDetections& shared_dets)
+                         SharedDetections& shared_dets,
+                         NpuInferenceSchedulerPtr npu_scheduler)
     : cfg_(model_cfg), det_cfg_(det_cfg),
       image_cfg_(image_cfg),
-      in_queue_(in_queue), mqtt_queue_(mqtt_queue), shared_dets_(shared_dets) {}
+      in_queue_(in_queue), mqtt_queue_(mqtt_queue), shared_dets_(shared_dets),
+      npu_scheduler_(std::move(npu_scheduler)) {}
 
 // 析构时兜底调用 stop()，保证即使调用方忘记手动 stop，线程和 RKNN 资源也不会泄漏。
 InferThread::~InferThread() { stop(); }
@@ -43,6 +45,20 @@ InferThread::~InferThread() { stop(); }
 // 3) 初始化上报时间戳、置 running_=true，再起 run() 所在的工作线程。
 // 线程起来之后 start() 立即返回，不等待第一帧推理完成。
 void InferThread::start() {
+    if (npu_scheduler_) {
+        if (!npu_scheduler_->is_running()) {
+            throw std::runtime_error("InferThread: NPU scheduler is not running");
+        }
+        last_report_time_ = std::chrono::steady_clock::now();
+        running_ = true;
+        npu_scheduler_->register_channel(
+            {cfg_.channel_id, cfg_.target_infer_fps, cfg_.npu_weight},
+            [this](const NpuInferenceResult& result) { on_scheduled_result(result); });
+        scheduler_registered_ = true;
+        thread_ = std::thread(&InferThread::run_scheduled, this);
+        return;
+    }
+
     YoloConfig yolo_cfg;
     yolo_cfg.conf_threshold   = cfg_.conf_threshold;
     yolo_cfg.iou_threshold    = cfg_.iou_threshold;
@@ -72,8 +88,51 @@ void InferThread::start() {
 void InferThread::stop() {
     running_ = false;
     if (thread_.joinable()) thread_.join();
+    if (npu_scheduler_ && scheduler_registered_) {
+        npu_scheduler_->unregister_channel(cfg_.channel_id);
+        scheduler_registered_ = false;
+        return;
+    }
     if (input_mem_)  { rknn_destroy_mem(ctx_, input_mem_);  input_mem_  = nullptr; }
     if (ctx_)        { rknn_destroy(ctx_); ctx_ = 0; }
+}
+
+void InferThread::run_scheduled() {
+    while (running_) {
+        Frame frame;
+        if (!in_queue_.pop(frame, 200)) continue;
+        Frame fresher;
+        while (in_queue_.pop(fresher, 0)) frame = std::move(fresher);
+        if (!npu_scheduler_->submit(cfg_.channel_id, std::move(frame)) && running_) {
+            std::cerr << "[Infer] scheduler submit rejected channel=" << cfg_.channel_id << "\n";
+        }
+    }
+}
+
+void InferThread::on_scheduled_result(const NpuInferenceResult& result) {
+    if (!running_ || !result.success) return;
+    shared_dets_.update(result.detections, result.frame_id, result.pts_ms,
+                        result.frame_width, result.frame_height);
+    std::cout << "[Infer] channel=" << cfg_.channel_id
+              << " scheduler cpu:" << result.preprocess_ms
+              << " cpy:" << result.input_sync_ms
+              << " npu:" << result.npu_ms
+              << " cnv:" << result.output_postprocess_ms
+              << " total:" << (result.preprocess_ms + result.input_sync_ms +
+                                result.npu_ms + result.output_postprocess_ms)
+              << " ms objs:" << result.detections.size() << "\n" << std::flush;
+
+    const auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::seconds>(now - last_report_time_).count() <
+        det_cfg_.report_interval_sec) {
+        return;
+    }
+    last_report_time_ = now;
+    const std::string key = summary_key(result.detections);
+    if (key != last_summary_key_) {
+        last_summary_key_ = key;
+        mqtt_queue_.push(summarize(result.detections, nullptr, nullptr), 100);
+    }
 }
 
 // 把 cfg_.path 指向的 .rknn 文件读进内存，初始化 RKNN 运行时，并完成三件事：

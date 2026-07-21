@@ -17,6 +17,7 @@
 #include "infer/RoiFilter.hpp"
 #include "infer/TilingTask.hpp"
 #include "infer/ThumbnailTask.hpp"
+#include "infer/NpuInferenceScheduler.hpp"
 
 struct ModelConfig {
     std::string channel_id = "single";
@@ -56,6 +57,8 @@ struct ModelConfig {
     bool track_global_motion_center_filter = false;
     float track_global_motion_smoothing_alpha = 0.25f;
     int track_global_motion_min_tracks = 3;
+    int target_infer_fps = 0;
+    int npu_weight = 1;
 };
 struct DetectionConfig {
     int report_interval_sec = 1;
@@ -66,12 +69,15 @@ public:
                 const ImageProcessingConfig& image_cfg,
                 BlockingQueue<Frame>& in_queue,
                 BlockingQueue<std::string>& mqtt_queue,
-                SharedDetections& shared_dets);
+                SharedDetections& shared_dets,
+                NpuInferenceSchedulerPtr npu_scheduler = nullptr);
     ~InferThread();
     void start();
     void stop();
 private:
     void run();
+    void run_scheduled();
+    void on_scheduled_result(const NpuInferenceResult& result);
     bool load_model();
     std::vector<Detection> infer_once(const Frame& frame, const TileRect* region = nullptr);
     std::string summarize(const std::vector<Detection>& dets,
@@ -85,6 +91,9 @@ private:
     BlockingQueue<Frame>& in_queue_;
     BlockingQueue<std::string>& mqtt_queue_;
     SharedDetections& shared_dets_;
+    // P0 仅完成依赖注入；P2 会把 RKNN 生命周期迁移到该进程级对象。
+    NpuInferenceSchedulerPtr npu_scheduler_;
+    bool scheduler_registered_ = false;
     std::thread thread_;
     std::atomic<bool> running_{false};
 

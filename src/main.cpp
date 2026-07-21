@@ -19,6 +19,8 @@ extern "C" {
 #include <nlohmann/json.hpp>
 
 #include "app/ChannelPipeline.hpp"
+#include "infer/NpuInferenceScheduler.hpp"
+#include "infer/RknnNpuExecutor.hpp"
 
 using json = nlohmann::json;
 
@@ -143,6 +145,100 @@ void validate_output_topology(const std::vector<NormalizedChannel>& channels, bo
     }
 }
 
+NpuSchedulerConfig parse_npu_scheduler_config(const json& root_config) {
+    const json scheduler = root_config.value("npu_scheduler", json::object());
+    if (!scheduler.is_object()) {
+        throw std::runtime_error("Config error: npu_scheduler must be an object");
+    }
+
+    NpuSchedulerConfig config;
+    config.enabled = scheduler.value("enabled", false);
+    config.mode = scheduler.value("mode", std::string("global_serial"));
+    config.core_mask = scheduler.value("core_mask", std::string("0_1_2"));
+    config.global_target_fps = scheduler.value("global_target_fps", 0);
+    config.max_frame_age_ms = scheduler.value("max_frame_age_ms", 250);
+    config.stats_interval_sec = scheduler.value("stats_interval_sec", 10);
+    return config;
+}
+
+bool image_processing_enabled(const json& channel_config) {
+    const json image = channel_config.value("image_processing", json::object());
+    const auto enabled = [&image](const char* key) {
+        return image.value(key, json::object()).value("enabled", false);
+    };
+    return enabled("thumbnail") || enabled("roi") || enabled("tiling");
+}
+
+void validate_npu_scheduler_config(const NpuSchedulerConfig& scheduler,
+                                   const std::vector<NormalizedChannel>& channels) {
+    if (!scheduler.enabled) return;
+
+    if (scheduler.mode != "global_serial") {
+        throw std::runtime_error("Config error: npu_scheduler.mode must be global_serial");
+    }
+    if (scheduler.core_mask != "0_1_2") {
+        throw std::runtime_error("Config error: npu_scheduler.core_mask must be 0_1_2 in P0");
+    }
+    if (scheduler.global_target_fps <= 0 || scheduler.max_frame_age_ms < 0 ||
+        scheduler.stats_interval_sec <= 0) {
+        throw std::runtime_error("Config error: invalid npu_scheduler budget, frame age or stats interval");
+    }
+
+    std::string model_path;
+    std::string output_layout;
+    int model_input_width = 640;
+    int model_input_height = 640;
+    int requested_fps = 0;
+    for (const auto& channel : channels) {
+        const json model = channel.config.value("model", json::object());
+        const std::string path = model.value("path", std::string{});
+        const std::string layout = model.value("output_layout", std::string("decoded"));
+        const int input_width = model.value("input_width", 640);
+        const int input_height = model.value("input_height", 640);
+        const int target_fps = model.value("target_infer_fps", 0);
+        const int weight = model.value("npu_weight", 1);
+
+        if (path.empty() || target_fps <= 0 || weight < 1) {
+            throw std::runtime_error(
+                "Config error: channel " + channel.id +
+                " requires model.path, target_infer_fps > 0 and npu_weight >= 1 when scheduler is enabled");
+        }
+        if (image_processing_enabled(channel.config)) {
+            throw std::runtime_error(
+                "Config error: channel " + channel.id +
+                " must disable thumbnail, ROI and tiling for the first scheduler implementation");
+        }
+        if (model_path.empty()) {
+            model_path = path;
+            output_layout = layout;
+            model_input_width = input_width;
+            model_input_height = input_height;
+        } else if (path != model_path || layout != output_layout ||
+                   input_width != model_input_width || input_height != model_input_height) {
+            throw std::runtime_error(
+                "Config error: all scheduler channels must use the same model path, output layout and input contract");
+        }
+        requested_fps += target_fps;
+    }
+    if (requested_fps > scheduler.global_target_fps) {
+        throw std::runtime_error(
+            "Config error: sum of model.target_infer_fps exceeds npu_scheduler.global_target_fps");
+    }
+}
+
+ModelConfig executor_model_config(const NormalizedChannel& channel) {
+    const json model = channel.config.at("model");
+    const json detection = channel.config.at("detection");
+    ModelConfig config;
+    config.channel_id = "npu-executor";
+    config.path = model.at("path").get<std::string>();
+    config.conf_threshold = model.at("conf_threshold").get<float>();
+    config.iou_threshold = model.at("iou_threshold").get<float>();
+    config.target_classes = detection.at("target_classes").get<std::vector<std::string>>();
+    config.output_layout = model.value("output_layout", std::string("decoded"));
+    return config;
+}
+
 class FFmpegNetworkGuard {
 public:
     FFmpegNetworkGuard() {
@@ -168,16 +264,35 @@ int main(int argc, char* argv[]) {
         const json root_config = load_entry_config(std::filesystem::path(argv[1]));
         const auto channels = normalize_channels(root_config);
         validate_output_topology(channels, root_config.contains("channels"));
+        const NpuSchedulerConfig scheduler_config = parse_npu_scheduler_config(root_config);
+        validate_npu_scheduler_config(scheduler_config, channels);
 
         std::cout << "[Config] channels=" << channels.size() << "\n";
+        FFmpegNetworkGuard ffmpeg_network;
+        std::shared_ptr<RknnNpuExecutor> npu_executor;
+        NpuInferenceSchedulerPtr npu_scheduler;
+        if (scheduler_config.enabled) {
+            npu_executor = std::make_shared<RknnNpuExecutor>(executor_model_config(channels.front()));
+            std::string executor_error;
+            if (!npu_executor->start(&executor_error)) {
+                throw std::runtime_error("NPU executor startup failed: " + executor_error);
+            }
+            npu_scheduler = std::make_shared<NpuInferenceScheduler>(scheduler_config);
+            npu_scheduler->set_executor([npu_executor](const NpuChannelConfig& channel, const Frame& frame) {
+                return npu_executor->execute(channel, frame);
+            });
+            npu_scheduler->start();
+            std::cout << "[NpuScheduler] mode=global_serial core_mask=0_1_2 global_target_fps="
+                      << scheduler_config.global_target_fps << "\n";
+        }
+
         std::vector<std::unique_ptr<ChannelPipeline>> pipelines;
         pipelines.reserve(channels.size());
         for (const auto& channel : channels) {
             std::cout << "[Config] channel=" << channel.id << "\n";
-            pipelines.push_back(std::make_unique<ChannelPipeline>(channel.id, channel.config));
+            pipelines.push_back(std::make_unique<ChannelPipeline>(channel.id, channel.config, npu_scheduler));
         }
 
-        FFmpegNetworkGuard ffmpeg_network;
         std::signal(SIGINT, on_signal);
         std::signal(SIGTERM, on_signal);
 
@@ -189,6 +304,8 @@ int main(int argc, char* argv[]) {
             for (auto it = pipelines.rbegin(); it != pipelines.rend(); ++it) {
                 (*it)->stop();
             }
+            if (npu_scheduler) npu_scheduler->stop();
+            if (npu_executor) npu_executor->stop();
             throw;
         }
 
@@ -205,6 +322,8 @@ int main(int argc, char* argv[]) {
         for (auto it = pipelines.rbegin(); it != pipelines.rend(); ++it) {
             (*it)->stop();
         }
+        if (npu_scheduler) npu_scheduler->stop();
+        if (npu_executor) npu_executor->stop();
         std::cout << "Done.\n";
         return 0;
     } catch (const std::exception& e) {

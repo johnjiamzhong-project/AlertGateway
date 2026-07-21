@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AlertGateway 本次修改总览</title>
+  <style>
+    :root {
+      --bg: #f4f7fb; --card: #ffffff; --ink: #172033; --muted: #637087;
+      --line: #dce4ef; --blue: #2563eb; --blue-soft: #eaf1ff;
+      --green: #078669; --green-soft: #e7f8f2; --orange: #d97706;
+      --orange-soft: #fff3df; --red: #c2413b; --red-soft: #fff0ef;
+      --purple: #7654c8; --purple-soft: #f1edff;
+      --shadow: 0 12px 28px rgba(35, 55, 86, .08);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--ink); background: var(--bg); font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+    .wrap { max-width: 1360px; margin: 0 auto; padding: 34px 24px 64px; }
+    .hero { padding: 34px 38px; border: 1px solid #dbe7fb; border-radius: 24px; background: linear-gradient(135deg, #edf4ff 0%, #fff 58%, #f0fbf8 100%); box-shadow: var(--shadow); }
+    .eyebrow { color: var(--blue); font-weight: 700; letter-spacing: .08em; font-size: 12px; }
+    h1 { margin: 8px 0 10px; font-size: clamp(28px, 4vw, 46px); line-height: 1.15; }
+    h2 { margin: 0 0 18px; font-size: 23px; } h3 { margin: 0 0 4px; font-size: 16px; }
+    p { margin: 7px 0; color: var(--muted); } .summary { max-width: 900px; font-size: 17px; }
+    .tags { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+    .tag { padding: 4px 11px; border-radius: 999px; color: #31527e; background: rgba(255,255,255,.8); border: 1px solid #cbdcf8; font-size: 13px; }
+    section { margin-top: 28px; } .card { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 24px; box-shadow: var(--shadow); }
+    .grid { display: grid; gap: 18px; } .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .flow { display: flex; align-items: stretch; gap: 9px; overflow-x: auto; padding: 8px 2px 14px; }
+    .node { min-width: 145px; flex: 1; padding: 14px 13px; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
+    .node strong { display: block; margin-bottom: 3px; } .node small { display: block; color: var(--muted); line-height: 1.45; }
+    .arrow { align-self: center; color: #8191aa; font-size: 25px; font-weight: 700; }
+    .blue { border-color: #b9d0ff; background: var(--blue-soft); } .green { border-color: #b4eadc; background: var(--green-soft); }
+    .orange { border-color: #f3d39c; background: var(--orange-soft); } .purple { border-color: #d5c9ff; background: var(--purple-soft); }
+    .red { border-color: #f0c4c1; background: var(--red-soft); }
+    .lanes { display: grid; grid-template-columns: 1fr 1fr 1.25fr 1fr; gap: 12px; align-items: center; }
+    .lane-col { display: grid; gap: 10px; } .lane { padding: 11px 13px; border-radius: 12px; border: 1px solid #cbd8eb; background: #f8fbff; }
+    .lane b { display: block; color: var(--blue); } .lane small { color: var(--muted); }
+    .lane-center { min-height: 168px; display: grid; place-items: center; text-align: center; padding: 18px; border: 2px solid #9cbcff; border-radius: 18px; background: linear-gradient(160deg, #eaf1ff, #f8fbff); }
+    .lane-center strong { font-size: 18px; color: #1d4ed8; } .lane-center small { color: var(--muted); }
+    .metric { display: flex; gap: 14px; align-items: baseline; padding: 14px 0; border-bottom: 1px solid #edf1f6; }
+    .metric:last-child { border-bottom: 0; padding-bottom: 0; } .metric .num { min-width: 94px; font-size: 25px; font-weight: 800; color: var(--blue); }
+    .metric .label { color: var(--muted); } .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .compare > div { padding: 16px; border-radius: 14px; } .compare h3 { margin-bottom: 8px; }
+    .compare ul { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
+    .timeline { position: relative; display: grid; gap: 13px; } .timeline::before { content: ""; position: absolute; left: 13px; top: 10px; bottom: 10px; width: 2px; background: #cbd8eb; }
+    .event { position: relative; display: grid; grid-template-columns: 28px 1fr; gap: 12px; }
+    .dot { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 50%; color: #fff; background: var(--blue); font-size: 12px; font-weight: 700; z-index: 1; }
+    .event-card { padding: 11px 14px; border: 1px solid var(--line); border-radius: 12px; background: #fbfcfe; }
+    code { padding: 2px 5px; border-radius: 5px; background: #eef2f7; color: #39475c; font: 13px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    pre { margin: 12px 0 0; padding: 15px; overflow: auto; border-radius: 12px; background: #172033; color: #dce8ff; font: 13px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .note { padding: 13px 15px; border-left: 4px solid var(--orange); border-radius: 8px; background: var(--orange-soft); color: #86500d; }
+    .footer { margin-top: 26px; color: #8191aa; font-size: 13px; text-align: center; }
+    @media (max-width: 900px) { .grid.two, .compare { grid-template-columns: 1fr; } .lanes { grid-template-columns: 1fr; } .lane-center { min-height: auto; } .hero { padding: 25px; } }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header class="hero">
+      <div class="eyebrow">ALERTGATEWAY · CHANGE OVERVIEW</div>
+      <h1>本次修改总览</h1>
+      <p class="summary">围绕多路视频实时处理，本次改动把单路推理流程扩展为全局NPU调度、多路RTMP管线，并补齐4K解码降1080p、媒体PTS和测试验证工具。</p>
+      <div class="tags"><span class="tag">全局NPU调度</span><span class="tag">4K → 1080p</span><span class="tag">多路RTMP</span><span class="tag">媒体PTS</span><span class="tag">手动SRS</span></div>
+    </header>
+
+    <section>
+      <div class="card">
+        <h2>一、当前4K处理主链路</h2>
+        <div class="flow">
+          <div class="node blue"><strong>4K源视频</strong><small>3840×2160<br>H.264/H.265</small></div><div class="arrow">→</div>
+          <div class="node green"><strong>SRS输入</strong><small>只做原码流转发<br>alertgateway_4k_source_* </small></div><div class="arrow">→</div>
+          <div class="node orange"><strong>MPP/VPU解码</strong><small>h264_rkmpp<br>优先输出NV12</small></div><div class="arrow">→</div>
+          <div class="node purple"><strong>解码后缩放</strong><small>NV12 2:1<br>NEON/CPU主路径</small></div><div class="arrow">→</div>
+          <div class="node blue"><strong>全局NPU调度</strong><small>多路共享执行器<br>每路目标推理帧率</small></div><div class="arrow">→</div>
+          <div class="node green"><strong>1080p输出</strong><small>MPP编码<br>独立SRS结果流</small></div>
+        </div>
+        <div class="note">关键结论：板端解码后再缩放不会绕过4K解码成本。四路4K并发时，主要瓶颈仍在MPP/VPU解码和共享媒体资源。</div>
+      </div>
+    </section>
+
+    <section class="grid two">
+      <div class="card">
+        <h2>二、全局NPU调度改动</h2>
+        <div class="lanes">
+          <div class="lane-col"><div class="lane"><b>Channel 1</b><small>最新帧队列</small></div><div class="lane"><b>Channel 2</b><small>最新帧队列</small></div><div class="lane"><b>Channel 3/4</b><small>独立状态与预算</small></div></div>
+          <div class="lane-col"><div class="lane"><b>提交策略</b><small>按目标FPS、权重、帧龄选择</small></div><div class="lane"><b>丢弃策略</b><small>推理忙时丢旧帧，保留最新帧</small></div><div class="lane"><b>状态统计</b><small>平均耗时、P95、busy ratio</small></div></div>
+          <div class="lane-center"><div><strong>唯一NPU Worker</strong><br><small>统一调用RKNN执行器<br>避免多线程同时争抢NPU</small></div></div>
+          <div class="lane-col"><div class="lane green"><b>Channel 1结果</b><small>按frame_id / pts回传</small></div><div class="lane green"><b>Channel 2结果</b><small>更新共享检测框</small></div><div class="lane green"><b>Channel 3/4结果</b><small>独立完成回调</small></div></div>
+        </div>
+        <p>主要代码：<code>src/infer/NpuInferenceScheduler.*</code>、<code>src/infer/RknnNpuExecutor.*</code>、<code>src/main.cpp</code>。</p>
+      </div>
+
+      <div class="card">
+        <h2>三、多路管线拆分</h2>
+        <div class="flow" style="display:grid;grid-template-columns:1fr auto 1fr;align-items:center">
+          <div class="node blue"><strong>输入侧</strong><small>每路PullStreamThread<br>独立RTMP地址<br>独立解码和帧队列</small></div><div class="arrow">→</div>
+          <div class="node purple"><strong>共享侧</strong><small>一个NPU Scheduler<br>一个RKNN Executor<br>按路返回检测结果</small></div>
+          <div class="node green"><strong>输出侧</strong><small>每路EncodeThread<br>独立StreamThread<br>alertgateway_channel_1~4</small></div><div class="arrow">←</div>
+          <div class="node orange"><strong>框同步</strong><small>通过frame_id、媒体PTS<br>将最新检测框叠加到视频</small></div>
+        </div>
+        <p>多路输出使用固定模板：<code>rtmp://192.168.0.168/live/alertgateway_channel_{id}</code>。</p>
+      </div>
+    </section>
+
+    <section>
+      <div class="card">
+        <h2>四、时间戳链路修复</h2>
+        <div class="flow">
+          <div class="node blue"><strong>AVFrame</strong><small>best_effort_timestamp<br>输入time_base</small></div><div class="arrow">→</div>
+          <div class="node green"><strong>Frame::pts_ms</strong><small>媒体时间<br>用于视频/框对齐</small></div><div class="arrow">→</div>
+          <div class="node orange"><strong>MPP Frame</strong><small>EncodeThread<br>沿用源媒体PTS</small></div><div class="arrow">→</div>
+          <div class="node purple"><strong>EncodedPacket</strong><small>保留PTS/DTS<br>不再假定固定30FPS</small></div><div class="arrow">→</div>
+          <div class="node green"><strong>RTMP/FLV</strong><small>单调递增保护<br>重连后重新归零</small></div>
+        </div>
+        <div class="note">墙上时钟 <code>timestamp_ms</code> 与媒体时间 <code>pts_ms</code> 分离：前者用于ROI/MQTT/事件，后者用于视频播放和检测框同步。</div>
+      </div>
+    </section>
+
+    <section class="grid two">
+      <div class="card">
+        <h2>五、问题与处理结果</h2>
+        <div class="compare">
+          <div class="red"><h3>遇到的问题</h3><ul><li>四路4K并发画面卡顿</li><li>DMA-BUF导入RGA失败、花屏</li><li>低处理帧率下PTS不均匀</li><li>多路脚本复用输入流名</li></ul></div>
+          <div class="green"><h3>对应处理</h3><ul><li>增加Pull分段性能统计</li><li>优先NV12，NEON 2:1缩放</li><li>使用源媒体PTS并做单调保护</li><li>输入流独立命名并校验分辨率</li></ul></div>
+        </div>
+        <div class="metric"><span class="num">1.2ms</span><span class="label">4K→1080p NEON缩放平均耗时，缩放不是主要瓶颈</span></div>
+        <div class="metric"><span class="num">27.6FPS</span><span class="label">四路全局NPU调度实测总处理能力，约每路6.9FPS</span></div>
+        <div class="metric"><span class="num">12–17FPS</span><span class="label">四路4K板端解码路径实测输出范围，仍受MPP/VPU资源限制</span></div>
+      </div>
+
+      <div class="card">
+        <h2>六、两种4K方案对比</h2>
+        <div class="compare">
+          <div class="orange"><h3>当前板端降1080p</h3><ul><li>SRS转发4K原码流</li><li>板端MPP解码4K</li><li>解码后NV12缩放</li><li>仍承担4K解码瓶颈</li></ul></div>
+          <div class="purple"><h3>推荐的SRS主机转码</h3><ul><li>SRS接收4K原码流</li><li>主机端FFmpeg转1080p</li><li>板端只解码1080p</li><li>降低板端VPU压力</li></ul></div>
+        </div>
+        <pre>4K源 → SRS(4K) → FFmpeg scale=1920:1080
+    → SRS(1080p) → run_1080p专用板端管线</pre>
+        <p>注意：接入SRS转码结果时，不能同时让本地测试脚本向同一1080p流名发布。</p>
+      </div>
+    </section>
+
+    <section>
+      <div class="card">
+        <h2>七、文件与验证入口</h2>
+        <div class="timeline">
+          <div class="event"><div class="dot">1</div><div class="event-card"><h3>核心调度</h3><p><code>src/infer/NpuInferenceScheduler.*</code>、<code>src/infer/RknnNpuExecutor.*</code></p></div></div>
+          <div class="event"><div class="dot">2</div><div class="event-card"><h3>拉流、解码、缩放和PTS</h3><p><code>src/capture/PullStreamThread.cpp</code>、<code>src/encode/EncodeThread.cpp</code>、<code>src/stream/StreamThread.cpp</code></p></div></div>
+          <div class="event"><div class="dot">3</div><div class="event-card"><h3>四路测试</h3><p><code>run_4k_4channel.sh</code>：4K输入、板端降1080p；<code>run_1080p_4channel.sh</code>：1080p输入直处理。</p></div></div>
+          <div class="event"><div class="dot">4</div><div class="event-card"><h3>开发文档</h3><p><code>docs/NPU全局调度/</code>：调度设计与可执行开发计划。</p></div></div>
+        </div>
+      </div>
+    </section>
+
+    <div class="footer">AlertGateway · 本页面为本次代码修改的可视化说明 · SRS仍由用户手动启动，测试脚本只检测不自动管理SRS</div>
+  </main>
+</body>
+</html>

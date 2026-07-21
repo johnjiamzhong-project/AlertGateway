@@ -19,7 +19,8 @@
 // main 只负责创建、启动和停止多个 ChannelPipeline。
 class ChannelPipeline {
 public:
-    ChannelPipeline(std::string channel_id, nlohmann::json config);
+    ChannelPipeline(std::string channel_id, nlohmann::json config,
+                    NpuInferenceSchedulerPtr npu_scheduler = nullptr);
     ~ChannelPipeline();
 
     ChannelPipeline(const ChannelPipeline&) = delete;
@@ -35,6 +36,8 @@ private:
 
     std::string channel_id_;
     nlohmann::json config_;
+    // 仅由 main 创建一次并注入各 pipeline；P2 起 InferThread 使用它执行 NPU job。
+    NpuInferenceSchedulerPtr npu_scheduler_;
 
     // 声明在队列之前，保证队列残留 Frame 释放时池仍然存活。
     std::shared_ptr<FrameBufferPool> frame_pool_;

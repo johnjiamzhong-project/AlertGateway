@@ -1,0 +1,53 @@
+{
+  "npu_scheduler": {
+    "enabled": true,
+    "mode": "global_serial",
+    "core_mask": "0_1_2",
+    "global_target_fps": 7,
+    "max_frame_age_ms": 250,
+    "stats_interval_sec": 10
+  },
+  "model": {
+    "path": "model/yolov8s_4k_photos_head_20e_20260718_finaltest_int8.rknn",
+    "output_layout": "rockchip_dfl",
+    "conf_threshold": 0.25,
+    "iou_threshold": 0.45,
+    "target_infer_fps": 7,
+    "npu_weight": 1
+  },
+  "detection": {
+    "target_classes": ["cell phone", "cup", "keyboard", "mouse", "laptop", "book"],
+    "report_interval_sec": 1
+  },
+  "stream": {
+    "bitrate_kbps": 8000,
+    "draw_detection_labels": true,
+    "detection_alignment_delay_frames": 3,
+    "sink": "fixed_rtmp",
+    "rtmp_url": "rtmp://192.168.0.168/live/alertgateway_channel_1"
+  },
+  "mqtt": {
+    "broker": "192.168.0.168",
+    "port": 1883,
+    "topic": "desk/scheduler/one",
+    "client_id": "AlertGateway-scheduler-one"
+  },
+  "image_processing": {
+    "thumbnail": {"enabled": false},
+    "roi": {"enabled": false, "regions": []},
+    "tiling": {"enabled": false}
+  },
+  "channels": [
+    {
+      "id": "1",
+      "source": {
+        "type": "pull_stream",
+        "url": "rtmp://192.168.0.168/live/dual_a",
+        "width": 1920,
+        "height": 1080,
+        "fps": 30,
+        "reconnect_sec": 5
+      }
+    }
+  ]
+}

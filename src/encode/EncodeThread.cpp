@@ -491,7 +491,7 @@ void EncodeThread::draw_detection_label_nv12(uint8_t* nv12, int w, int h,
 //   3) 叠框：从 shared_dets_ 读最新一次推理结果（可能是上一帧甚至更早的，不强求对齐），
 //      直接在NV12像素上画绿框。
 //   4) 喂给MPP硬编码器：从DRM buffer group取一块物理内存，RGA直接写入（省掉memcpy），
-//      包装成MppFrame调 encode_put_frame()；PTS按 frame_idx_*1000/fps 线性递推
+//      包装成MppFrame调 encode_put_frame()；PTS沿用源视频媒体时间戳
 //      （假设严格匀速出帧，没有用实际墙钟时间戳）。
 //   5) 取编码结果：encode_put_frame/encode_get_packet 是异步关系，硬件内部有流水线
 //      缓冲，一次put不一定对应一次get，要用while循环把当前能取的包全部取干净，
@@ -522,25 +522,41 @@ void EncodeThread::run() {
         if (alignment_frames.size() <= static_cast<size_t>(std::max(0, cfg_.detection_alignment_delay_frames))) continue;
         frame = std::move(alignment_frames.front());
         alignment_frames.pop_front();
-        if (frame.raw_data.empty()) continue;
+        if (frame.empty()) continue;
         const auto frame_t = std::chrono::steady_clock::now();
         ++input_frames;
 
-        // 先从 DRM 池取 buffer，让 RGA 转换结果直接写入，省掉一次 memcpy
+        // 硬解码路径已经提供可导入的 MPP DRM buffer；普通采集/兼容路径才在这里申请编码 buffer。
         MppBuffer frame_buf = nullptr;
-        MPP_RET ret = mpp_buffer_get(buf_group_, &frame_buf, frame_size);
-        if (ret != MPP_OK || !frame_buf) {
-            std::cerr << "[Encode] mpp_buffer_get failed: " << ret << "\n";
-            continue;
+        bool owns_frame_buffer = false;
+        MPP_RET ret = MPP_OK;
+        if (frame.buffer_fd() >= 0 && frame.pixel_format == PixelFormat::NV12) {
+            frame_buf = frame.dma_buffer->buffer;
+        } else {
+            ret = mpp_buffer_get(buf_group_, &frame_buf, frame_size);
+            owns_frame_buffer = true;
+            if (ret != MPP_OK || !frame_buf) {
+                std::cerr << "[Encode] mpp_buffer_get failed: " << ret << "\n";
+                continue;
+            }
         }
         uint8_t* drm_ptr = static_cast<uint8_t*>(mpp_buffer_get_ptr(frame_buf));
         if (!drm_ptr) {
             std::cerr << "[Encode] mpp_buffer_get_ptr returned null\n";
-            mpp_buffer_put(frame_buf);
+            if (owns_frame_buffer) mpp_buffer_put(frame_buf);
             continue;
         }
 
-        if (frame.pixel_format == PixelFormat::NV12) {
+        if (frame.buffer_fd() >= 0 && frame.pixel_format == PixelFormat::NV12) {
+            // 拉流硬解码/RGA 已经生成了 MPP DRM buffer，直接交给编码器，避免
+            // DMA-BUF -> CPU vector -> 编码 DRM buffer 的往返拷贝。
+            frame_buf = frame.dma_buffer->buffer;
+            drm_ptr = static_cast<uint8_t*>(mpp_buffer_get_ptr(frame_buf));
+            if (!drm_ptr) {
+                std::cerr << "[Encode] decoded DMA buffer has no CPU mapping\n";
+                continue;
+            }
+        } else if (frame.pixel_format == PixelFormat::NV12) {
             // 输入已经是 NV12，直接拷贝到 MPP 的 DRM 缓冲区，完全避免格式转换
             memcpy(drm_ptr, frame.raw_data.data(), frame_size);
         } else {
@@ -585,7 +601,7 @@ void EncodeThread::run() {
         ret = mpp_frame_init(&mpp_frame);
         if (ret != MPP_OK || !mpp_frame) {
             std::cerr << "[Encode] mpp_frame_init failed: " << ret << "\n";
-            mpp_buffer_put(frame_buf);
+            if (owns_frame_buffer) mpp_buffer_put(frame_buf);
             continue;
         }
         mpp_frame_set_width(mpp_frame,      w);
@@ -593,7 +609,11 @@ void EncodeThread::run() {
         mpp_frame_set_hor_stride(mpp_frame, w);
         mpp_frame_set_ver_stride(mpp_frame, h);
         mpp_frame_set_fmt(mpp_frame,        MPP_FMT_YUV420SP);
-        mpp_frame_set_pts(mpp_frame,        frame_idx_ * 1000 / cfg_.fps);  // 按固定帧率线性推算PTS(ms)
+        // Preserve the source-side monotonic timestamp. If upstream decode or
+        // resize falls below the configured FPS, the output timeline must
+        // reflect the real frame spacing instead of pretending every frame
+        // arrived at a fixed 30 FPS cadence.
+        mpp_frame_set_pts(mpp_frame,        frame.pts_ms);
         mpp_frame_set_buffer(mpp_frame,     frame_buf);
         mpp_frame_set_eos(mpp_frame,        0);
 
@@ -601,7 +621,7 @@ void EncodeThread::run() {
         ret = mpi_->encode_put_frame(ctx_, mpp_frame);
         // 销毁 MppFrame 这个"描述符"对象
         mpp_frame_deinit(&mpp_frame);
-        mpp_buffer_put(frame_buf);
+        if (owns_frame_buffer) mpp_buffer_put(frame_buf);
         if (ret != MPP_OK) {
             std::cerr << "[Encode] encode_put_frame failed: " << ret << "\n";
             ++put_failures;

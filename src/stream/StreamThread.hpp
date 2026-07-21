@@ -66,5 +66,7 @@ private:
     bool             extradata_set_  = false;  // SPS/PPS是否已经设置进extradata（只需设置一次）
     std::vector<uint8_t> sps_;  // 缓存的SPS，重连后免等下一个关键帧，直接复用
     std::vector<uint8_t> pps_;  // 缓存的PPS，同上
-    int64_t          pkt_idx_   = 0;  // 累计写出的包数，作为线性递增的pts/dts
+    int64_t          pkt_idx_   = 0;  // 兼容旧状态统计；输出 PTS 使用源时间戳
+    int64_t          stream_pts_origin_ms_ = -1;
+    int64_t          last_stream_pts_ms_ = -1;
 };

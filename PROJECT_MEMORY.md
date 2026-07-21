@@ -1,6 +1,6 @@
 # AlertGateway 项目记忆
 
-最后更新：2026-07-19
+最后更新：2026-07-21
 
 ## 使用规则
 
@@ -1946,3 +1946,272 @@ The first automated 12/18 Mbps report was invalid because it used the old AlertG
 - `SharedDetections` 对同样的跨类别竞争关系不再立即切换类别：首帧把挑战者挂在既有轨迹上且不创建第二个框，连续两帧兼容后才受控切换；最终快照和重复轨迹清理也使用同一规则兜底。这样可避免手机/笔记本等大小框在相邻检测帧间来回跳动。
 - `image_processing_smoke` 覆盖联合复检优先、强包含只保留一个框，以及跨类别第 1 帧保持旧框、第 2 帧才切换；交叉编译通过，已在 ARM64 板端执行并输出 `image_processing_smoke: OK`。最新二进制已部署到 `firefly@192.168.0.200:~/AlertGateway/AlertGateway`。
 - 使用已手动启动的 SRS 进行 ROI 实流检查时，日志 `/tmp/alertgateway_4k_20260721_143208/board.log` 出现 77 次 `ROI exclusive suppression`，说明新候选互斥层已实际执行；链路统计稳定在约 30 FPS、约 18 Mbps，`enc_drop=0`、`out_drop=0`、`write_fail=0`。该轮旧的 0.60 IoS 版本仍记录到 IoS 约 0.50 的跨类别竞争框，因此门槛随后已收紧为 0.50 并重新完成板端冒烟测试；应在下一次播放器 A/B 中重点核对该边界案例。测试脚本只检查 SRS 是否已手动启动，未启动、停止或重启 SRS。
+
+## 2026-07-21 双路推流实测
+
+- 双路测试使用 `VID_20260712_131214.mp4` 和 `VID_20260712_131410.mp4`，源地址分别为 `live/dual_a`、`live/dual_b`，结果地址为固定模板 `live/alertgateway_channel_1`、`live/alertgateway_channel_2`。
+- 首次多次前置失败的根因不是 SRS 未启动，而是测试主机环境设置了 `http_proxy=http://192.168.0.168:7897`；curl 访问 SRS API 时实际连接代理端口 7897，导致 1985 请求超时，而 RTMP 1935 正常。使用 `NO_PROXY/no_proxy=192.168.0.168,192.168.0.200` 直连后，API 返回正常并通过手动 SRS 检查。
+- `/tmp/alertgateway_multi_20260721_160846/board.log` 记录单进程两路 `ChannelPipeline` 均启动并正常停止。稳定窗口两路约 29--31 FPS、约 7.9--8.3 Mbps，`enc_drop=0`、`write_fail=0`，仅早期 channel 2 出现一次 `out_drop=1`，后续为 0；推理队列的 `infer_drop` 属于低延迟最新帧覆盖计数。测试残留的板端进程已按本次 PID 优雅退出，SRS 未被测试启动、停止或重启。
+- 随后再次使用直连 SRS、`RUN_SEC=60` 完成双路复测，日志为 `/tmp/alertgateway_multi_20260721_161133/board.log`。两路均通过 API 前置检查并激活结果流；不同窗口输出约 21--28 FPS、约 5.6--7.5 Mbps，后续两路均持续有 `enc_drop=0`、`out_drop=0`、`write_fail=0`，队列无持续积压。两路 `ChannelPipeline` 均输出 `stopped` 和 `Done`，板端进程已退出；日志末尾 FLV header 更新提示属于中断收尾提示，不影响 RTMP 输出统计。
+
+## 2026-07-21 4K 非 ROI 性能拆分
+
+- 使用 `config/config_4k_candidate_20260719.json`（继承 `config_4k_18mbps.json`，ROI/Tiling 关闭）完成 60 秒 4K 测试，日志为 `/tmp/alertgateway_4k_20260721_161456/board.log`；结果地址为固定单路 `rtmp://192.168.0.168/live/alertgateway`。
+- 1,279 个推理样本：NPU 单次平均 `26.961 ms`，对应 NPU 原始处理能力约 `37.09 次/秒`；包含 CPU、拷贝、转换和调度的完整 `Infer` 平均 `40.942 ms`，实际完整推理节拍约 `24.42 帧/秒`。`infer_drop` 仍是低延迟队列覆盖计数，不是编码或推流丢帧。
+- `StreamStats` 共 5 个窗口：包含启动阶段平均约 `29.34 FPS / 17.65 Mbps`；去掉首个启动窗口后，稳定约 `30.03 FPS / 18.07 Mbps`，所有窗口 `write_fail=0`、队列为 0。`EncodeStats` 的 `out_drop=0`，说明推流链路没有输出丢帧。
+
+## 2026-07-21 四路并发推理压力实测
+
+- 新增临时 4 路非 ROI 配置 `config/config_multi_4ch_candidate.json`，通道 1--4 分别拉取 `dual_a`--`dual_d`，结果固定输出到 `alertgateway_channel_1`--`4`。C/D 源流分别复用 A/B 视频，仅用于观察并发资源压力。
+- `/tmp/alertgateway_multi_4ch_20260721_1624.log` 确认四个 `ChannelPipeline` 都启动并且四个结果流都产生过帧。每路独立统计：channel 1 NPU 平均 `50.44 ms`、完整推理 `55.06 ms`；channel 2 为 `50.72/55.24 ms`；channel 3 为 `50.31/54.90 ms`；channel 4 为 `48.23/52.71 ms`。对应每路按单次处理时间估算的服务率约 `19.7--20.7 次/秒`，但实际输出窗口约 `13--16 FPS`。
+- 与单路 4K 的 NPU `26.96 ms`、完整推理 `40.94 ms` 相比，四路同时请求全部三个 NPU 核心后 NPU 时延明显上升，证明当前没有应用层调度，主要瓶颈是多 RKNN context 的全核争用。四路 `infer_drop` 持续增加，但各路 `enc_drop=0`、`out_drop=0`、`write_fail=0`；当前结论是四路 pipeline 可以运行，不能保证四路 30 FPS 检测。
+- 随后为便于播放器同时观察，启动 5 分钟四路运行；实时日志 `/tmp/alertgateway_multi_4ch_20260721_1628.log` 显示争用继续恶化，部分时段每路 NPU 单次耗时升至 `85--88 ms`，因此画面明显卡顿。该压力进程已主动停止，SRS 未被操作；后续必须先引入全局 NPU 调度/限频，再重新做四路观看测试。
+
+## 2026-07-21 全局 NPU 调度设计
+
+- 已新增 `docs/NPU全局调度/NPU全局调度设计.md` 与可执行步骤
+  `docs/NPU全局调度/NPU全局调度开发计划.md`，针对四路 all-core RKNN context 争用给出增量设计，尚未修改运行代码。
+- 首版采用单个全局串行 NPU worker（独占一个 all-core RKNN context）和每通道最新帧邮箱；按限频后的 Round-Robin 公平派发，视频编码/推流保持独立。
+- 按单路 NPU 26.961 ms、保留 20% 余量估算，全局安全预算初始为约 29 次/秒；四路等权默认约 7 次检测/秒/路。该数值是待实测校准的起点，不能宣称四路 30 FPS 检测。
+- ROI/Tiling 将在基本调度验收后按单次 `rknn_run` 计 slot 接入，避免一个通道连续占用 NPU；SRS 仍只允许用户手动启动。
+
+## 2026-07-21 全局 NPU 调度 P0 完成
+
+- 已完成 P0（配置模型与接口边界），新增 `src/infer/NpuInferenceScheduler.hpp/.cpp`，目前只保存进程级调度配置和后续结果类型边界，不创建 worker、不调用 RKNN。
+- `ModelConfig` 已新增 `target_infer_fps` 与 `npu_weight`，`ChannelPipeline` 和 `InferThread` 已预留同一个 Scheduler 的依赖注入接口；默认值保持旧的独立推理行为。
+- `main.cpp` 已解析并校验 `npu_scheduler`：只接受 `global_serial` / `0_1_2`，检查预算、通道目标、模型路径/输出布局/输入契约一致性，并要求第一版关闭 Thumbnail/ROI/Tiling。P0 对 `enabled=true` 会在校验通过后明确拒绝启动，防止尚未实现 worker 时误走旧的多 context 并发路径。
+- `AlertGateway`、`infer_camera_smoke`、`image_processing_smoke` 交叉编译通过；现有 JSON 配置已用 Python 标准库通过语法校验（环境没有 `jq`），`git diff --check` 通过。未上板、未启动测试流、未操作 SRS。
+- 下一步：P1，实现可注入假 executor 的 Scheduler 邮箱、限频、Round-Robin 和主机侧算法测试，仍不接入 RKNN。
+
+## 2026-07-21 全局 NPU 调度 P1 完成
+
+- `NpuInferenceScheduler` 已实现独立于 RKNN 的单 worker 调度骨架：通道注册/注销、每通道一帧 latest mailbox、提交覆盖、过期帧淘汰、按 `target_infer_fps` 限频、从上次服务通道后开始的 Round-Robin 选路，以及安全停止时清空未派发邮箱。
+- Scheduler 通过可注入 `Executor` 抽象执行 job；P1 只使用主机假 executor，未创建 RKNN context、未调用 RGA/RKNN、未接入 `InferThread` 的实际推理路径。完成回调在停止/注销后被抑制，避免生命周期重入。
+- 新增 `tools/benchmark/npu_scheduler_smoke.cpp` 与 `BUILD_NPU_SCHEDULER_SMOKE`。主机原生编译运行输出 `npu_scheduler_smoke: OK`，覆盖最新帧覆盖、四路顺序 Round-Robin、7 FPS 限频、过期帧计数及停止丢弃待处理帧。
+- 交叉编译 `AlertGateway`、`infer_camera_smoke`、`image_processing_smoke`、`npu_scheduler_smoke` 全部通过；`git diff --check` 通过。未上板、未启动测试流、未操作 SRS。
+- 下一步：P2，把 RKNN context、输入内存、预处理、`rknn_run`、输出获取和后处理抽取为唯一 NPU executor；在此之前 `npu_scheduler.enabled=true` 仍会被主程序安全拒绝。
+
+## 2026-07-21 全局 NPU 调度 P2 完成
+
+- 已新增 `src/infer/RknnNpuExecutor.hpp/.cpp`。该对象独占 RKNN model context、`RKNN_NPU_CORE_0_1_2` mask、SRAM zero-copy 输入内存和输出 buffer 生命周期；`execute()` 在同一调用线程内完成 RGA（失败时 CPU）预处理、cache sync、`rknn_run`、outputs_get/release、decoded/rockchip_dfl 后处理，并只向上返回普通 `Detection` 列表和分段耗时。
+- P2 仍未把 Executor 挂到 `NpuInferenceScheduler` 或替换现有 `InferThread` 旧路径，因此当前单路/多路运行行为不变，也不会误形成“已完成全局串行化”的结论。主程序对 `npu_scheduler.enabled=true` 的 P0 防护保持有效。
+- `NpuInferenceResult` 已扩展为可承载检测结果、预处理、输入同步、NPU 和输出后处理耗时；P1 host scheduler smoke 仍通过。
+- 交叉编译 `AlertGateway`、`infer_camera_smoke`、`image_processing_smoke`、`rknn_benchmark`、`npu_scheduler_smoke` 全部通过；现有 JSON 语法和 `git diff --check` 通过。未上板、未启动测试流、未操作 SRS。
+- 下一步：P3 将 Scheduler 创建的唯一 `RknnNpuExecutor` 注入 worker，并把 `InferThread` 从直接 `rknn_run()` 改为提交/接收结果；需同时完成启动、停机和回调线程模型。
+
+## 2026-07-21 全局 NPU 调度 P3 完成（未上板）
+
+- `main.cpp` 在 `npu_scheduler.enabled=true` 时已创建唯一 `RknnNpuExecutor`、以它作为 `NpuInferenceScheduler` 的 executor 并启动 scheduler worker；多个 `ChannelPipeline` 注入同一 Scheduler。旧配置未开启该节点时仍保持原有独立 `InferThread` 路径。
+- Scheduler 模式下 `InferThread` 不再加载模型或调用 `rknn_run()`：它只从原有输入队列取最新帧并提交 mailbox；完成回调在 scheduler worker 上更新 `SharedDetections`、输出分段耗时日志并执行 MQTT 节流上报。P3 的配置校验仍要求 Thumbnail/ROI/Tiling 全部关闭。
+- 结果对象已补充源帧尺寸、PTS/时间戳，保证 Scheduler 回调更新的检测快照与编码对齐。Scheduler 的注销逻辑现在会标记通道不可再派发、清理 mailbox，并等待运行 job 和已开始的回调结束后再销毁通道状态；host smoke 新增该生命周期用例并通过。
+- 已移除 P0 对合法 `npu_scheduler.enabled=true` 的无条件拒绝。此模式首次启动会只创建一个 all-core RKNN context；实际板端验证尚未执行，不能宣称多路卡顿已解决。
+- 主机 `npu_scheduler_smoke: OK`；交叉编译 `AlertGateway`、`infer_camera_smoke`、`image_processing_smoke`、`rknn_benchmark`、`npu_scheduler_smoke` 全部通过，`git diff --check` 通过。未上板、未启动测试流、未操作 SRS。
+- 下一步：P4 增加可读的全局/通道统计与独立四路 scheduler 候选配置，再进行 P5 的单路、双路、四路分层板端验证。
+
+## 2026-07-21 全局 NPU 调度 P4 完成（未上板）
+
+- Scheduler 已新增 10 秒滚动统计：全局输出派发/完成数、NPU 平均/P95、busy ratio、排队等待 P95、过期帧数；每通道输出目标/实际检测 FPS、mailbox 覆盖、限频、过期、等待与端到端 P95、失败数。空闲时 worker 也会按统计到期时间唤醒并输出，避免仅在有帧时才统计。
+- `NpuInferenceResult` 与 scheduler job 记录提交、派发和完成时间，统计口径是 Scheduler 内部时间：queue wait 为提交到派发，e2e 为提交到 executor 返回；与已有 Encode/Stream 统计独立。
+- 新增 `config/config_multi_4ch_scheduler_candidate.json`：四路 `dual_a`--`dual_d`，固定结果地址 `alertgateway_channel_1`--`4`，全局预算 29 FPS、各路目标 7 FPS、最大帧龄 250 ms、ROI/Tiling/Thumbnail 均显式关闭。它是候选配置，尚未部署或实测。
+- 主机 `npu_scheduler_smoke: OK`；交叉构建和新候选 JSON 语法校验通过，`git diff --check` 通过。未上板、未启动测试流、未操作 SRS。
+- 下一步：P5 按单路 Scheduler 回归、双路、四路 120 秒的顺序上板测试；SRS 只能由用户手动启动，测试前只做就绪检查。
+
+## 2026-07-21 全局 NPU 调度 P5 真机回归通过
+
+- 测试全程只使用用户已手动启动的 SRS：只读检查 API/流状态，不执行 SRS 的启动、停止或重启；候选二进制以 `~/AlertGateway/AlertGateway.npu_scheduler_p5` 独立文件运行，配置放在板端 `/tmp/`，未覆盖生产二进制或配置。
+- 单路 Scheduler 60 秒回归：仅创建一个 `[NpuExecutor] RKNN context ready`，没有旧 `InferThread` 的独立 `rknn_init`。稳定窗口为 7.00--7.10 FPS，NPU P95 约 26.6--27.0 ms，队列等待 P95 约 102--119 ms、端到端 P95 约 144--150 ms；视频编码/推流约 30 FPS、约 8 Mbps，`enc_drop/out_drop/write_fail=0`。
+- 双路 60 秒回归：仍只创建一个 RKNN context，总调度稳定约 14 FPS（两路各约 6.9--7.0 FPS），NPU P95 约 27.2 ms、busy ratio 约 43%、队列等待 P95 约 127--135 ms；两路编码和 RTMP 推流均无编码丢弃或写失败。
+- 四路首轮使用四个本机实时缩放/编码发布端，输入仅约 14--23 FPS，调度实际约 22 FPS，故不作为验收结果；NPU 仍稳定在 P95 27.7 ms，证明瓶颈在主机发布端而非 Scheduler。
+- 四路有效回归改为预转码 1080p 文件后以 `-c:v copy` 发布四路。70 秒候选运行正常 `Done`：全局实际约 28.0--28.4 FPS，四路分别约 6.99--7.10 FPS；NPU 平均约 26.57--26.73 ms、P95 27.51--27.78 ms、busy ratio 约 87--89%，无 stale drop/执行失败。四路输入、编码和结果 RTMP 均约 30 FPS、约 8 Mbps，最终稳定窗口所有通道 `put_fail=0`、`out_drop=0`、`write_fail=0`、队列为 0。
+- 结论：P5 的单路、双路和四路验收已通过。全局单 worker + latest mailbox + 限频 Round-Robin 消除了原先四个 all-core RKNN context 争用导致的 85--88 ms NPU 尖峰；四路默认能力是每路约 7 FPS 检测、每路 30 FPS 编码推流，而不是四路 30 FPS 推理。
+- 下一步：由用户人工同时观看固定结果地址 `rtmp://192.168.0.168/live/alertgateway_channel_1` 至 `_4`，确认实际播放流畅性；随后可根据观感或指标再校准 29 FPS 全局预算、权重策略或进入 ROI/Tiling 的 slot 化接入。
+
+## 2026-07-21 当前 run.sh 默认 4K RGA/Zero-Copy 回归
+
+- 用户手动启动 SRS 后直接运行 `./run.sh`，实际进入默认的单路 4K ROI/Tiling 配置 `config/config_4k_roi_candidate_20260720.json`，不是四路 Scheduler 配置；SRS 前置检查通过，输入与结果流均 active，测试脚本未启动、停止或重启 SRS。
+- 120 秒测试日志为 `/tmp/alertgateway_4k_20260721_183855/board.log`。4K 输入/输出稳定约 30 FPS，输出约 17.8--18.4 Mbps；`enc_drop=0`、`out_drop=0`、`write_fail=0`，队列无持续积压，程序正常 `Done` 退出。
+- ROI Tiling、ROI boundary merge、joint-ROI recheck 和 exclusive suppression 均持续执行；板端日志没有 `RGA path failed`、`RGA letterbox failed`、`RGA preprocess failed`、RKNN 执行或输出获取失败。该轮确认当前旧 InferThread 路径的 RGA 直写 RKNN 输入内存和 CPU fallback 机制可稳定运行；`infer_drop` 是低延迟最新帧覆盖计数，不是编码/推流丢帧。
+
+## 2026-07-21 四路 4K Scheduler 测试入口准备
+
+- 新增 `config/config_multi_4ch_scheduler_4k_candidate.json`：四路输入均声明为 3840x2160@30，使用全局串行 Scheduler、全局 29 FPS、每路目标 7 FPS；Thumbnail、ROI、Tiling 明确关闭，结果地址固定为 `alertgateway_channel_1` 至 `_4`。
+- 新增可执行入口 `run_4k_4channel.sh`。脚本默认使用两段 4K 视频，C/D 分别复用 A/B；四路输入通过 `ffmpeg -c:v copy` 发布到独立 SRS 地址，避免主机实时转码成为测试瓶颈；板端以 `/tmp` 隔离二进制、配置和日志运行一个 Scheduler 进程。
+- 脚本只调用 `check_srs_manual.sh` 检查用户手动启动的 SRS，继承固定 `NO_PROXY/no_proxy` 直连设置，不包含 SRS 启动、停止或重启逻辑；测试结果、SRS 快照和板端日志保存在 `/tmp/alertgateway_4k_4channel_<timestamp>/`。
+- 已通过 `bash -n`、JSON 结构和四路分辨率/结果地址断言、`git diff --check`；尚未运行该四路 4K 入口。
+
+## 2026-07-21 四路 4K 全帧 Scheduler 首次实测未通过
+
+- 使用 `run_4k_4channel.sh`、四路原始 3840x2160 H.264 码流复制发布，测试日志为 `/tmp/alertgateway_4k_4channel_20260721_185916/board.log`。SRS 确认四路输入均为 H.264 High 3840x2160，四路结果均为 H.264 Main 3840x2160，因此第 2 路输入文件和 SRS 转发没有发现损坏。
+- 四路同时进行 4K 解码、RGA 前处理、全局 NPU 推理和 4K MPP 编码时，整体资源已超载：NPU busy ratio 接近 99--100%，全局 NPU 平均约 31--33 ms、P95 约 44--47 ms；各路编码/推流实际约 12--19 FPS，第 2 路约 13--17 FPS，码率约 3.5--4.7 Mbps，而不是配置目标 30 FPS/8 Mbps。
+- 第 2 路日志中 `enc_drop=0`、`out_drop=0`、`write_fail=0`，输入帧和输出包数量一致，也没有 RGA、RKNN、MPP 初始化或 RTMP 写失败；但播放端报告第 2 路花屏，当前应按“整体 4K 资源超载导致输出不满足实时编码条件”处理，不能判定四路 4K@30 可用。
+- 当前 Scheduler 解决了 NPU context 争用，但不能解决四路 4K 解码/前处理/MPP 编码总负载；下一步应先分别测四路 4K 降到 15 FPS 的稳定性，或评估 4K 输入降分辨率输出/编码资源分配，再决定是否继续追求四路 4K@30。
+
+## 2026-07-21 四路真实 4K@15 FPS Scheduler 测试
+
+- 为避免把“输入 30 FPS、程序内部抽帧到 15 FPS”误当成 15 FPS 测试，先在主机生成了真实
+  3840x2160@15 FPS 的 H.264 测试源：`/tmp/alertgateway_4k_4channel_15fps_sources/source_a_15fps.mp4`
+  和 `source_b_15fps.mp4`，并以码流复制方式发布四路。有效测试日志为
+  `/tmp/alertgateway_4k_4channel_20260721_191909/board.log`。
+- 四路输入均为真实 4K@15 FPS，使用全帧 Scheduler，ROI/Tiling/Thumbnail 均关闭。全局调度实际约
+  239--250 次/10 秒，NPU 平均约 26.9--27.3 ms、P95 约 28--29 ms，busy ratio 约 95--98%。
+- 四路实际检测约 5.3--6.4 FPS；编码/推流约 8--11 FPS/路，未达到 15 FPS 目标。第 2 路稳定窗口约
+  9.7--10.9 FPS、5.05--5.85 Mbps。各路稳定窗口 `enc_drop=0`、`out_drop=0`、`write_fail=0`，
+  未发现 RGA、RKNN、MPP 初始化或 RTMP 写失败。
+- 结论：真实四路 4K@15 FPS 仍不能判定为可用，瓶颈是四路 4K 解码、RGA 前处理、NPU 和 MPP
+  编码的总体资源饱和；相比 4K@30 已明显改善，但 Scheduler 只能解决 NPU context 争用，不能
+  将整条四路 4K 管线提升到实时 15 FPS。此前一次“15 FPS”测试使用的仍是 30 FPS 输入，不作为
+  有效结论。
+
+## 2026-07-21 4K 解码后降到 1080p 候选
+
+- `PullStreamThread` 新增 `source.output_width/output_height`，在 FFmpeg 解码并整理为连续 NV12
+  后优先调用 RGA 缩放；RGA 失败时使用 CPU 最近邻兜底。后续编码、推理和 RTMP 推流只接收缩放后的
+  处理帧，输入源的 `source.fps=30` 保持不变，不在该路径主动抽帧。
+- 新增候选配置 `config/config_multi_4ch_scheduler_4k_to1080_candidate.json`：四路输入仍声明为
+  3840x2160@30，解码后处理/输出为 1920x1080@30，Scheduler 全局预算 29 FPS、每路检测目标 7 FPS，
+  结果地址仍为 `alertgateway_channel_1` 至 `_4`。
+- 新增入口 `run_4k_4channel_to1080.sh`，复用原四路发布和手动 SRS 检查流程；交叉编译、JSON 和
+  shell 语法校验已通过。当前尚未完成板端实测：本轮检查时 SRS API 与 RTMP 端口均不可访问，
+  测试未启动任何 SRS 实例。
+
+## 2026-07-21 4K 解码后降到 1080p 首次实测
+
+- 用户手动启动 SRS 后，使用 `RUN_SEC=60 CONFIG=config/config_multi_4ch_scheduler_4k_to1080_candidate.json
+  ./run_4k_4channel.sh` 完成四路测试；SRS 只做了 API/1935 只读前置检查，未被测试启动、停止或重启。
+  日志位于 `/tmp/alertgateway_4k_4channel_20260721_195715/`。
+- 板端日志确认四路均为 `3840x2160 yuvj420p` 解码后执行 `post_decode_resize=3840x2160 -> 1920x1080`，
+  MPP 四路编码配置也确认为 `1920x1080`、目标 `30 FPS`。
+- 四路并发时 RGA 的 NV12 缩放调用持续失败并进入 CPU 兜底（日志统计 `PullStream` RGA 缩放失败 81 次，
+  Scheduler Executor 前处理 RGA 失败 31 次）。因此虽然处理分辨率已降为 1080p，但 4K→NV12 整理和 CPU
+  缩放仍成为瓶颈，实际输出约为 channel 1 `14--16 FPS`、channel 2 `14--19 FPS`、channel 3 `10--16 FPS`、
+  channel 4 `10--15 FPS`，没有保持 30 FPS。
+- Scheduler 全局约 `208--245` 次/10 秒，单路实际检测约 `5.2--6.2 FPS`，NPU 平均约 `31--37 ms`、P95
+  约 `41--65 ms`，busy ratio 约 `98--99%`。各路 `enc_drop=0`、`out_drop=0`、`write_fail=0`，说明没有
+  发现 MPP 输出丢帧或 RTMP 写失败；本次结论是“分辨率配置正确，但 RGA/CPU 前处理与四路 4K 解码总负载仍不满足 30 FPS”。
+
+## 2026-07-21 RGA 缩放失败原因定位
+
+- 读取本次测试对应板端内核日志后，失败点明确发生在 RGA buffer map/submit 阶段，而不是缩放比例或
+  1080p 格式不支持：`RGA_MMU unsupported memory larger than 4G`、`scheduler core[4] unsupported
+  mm_flag[0x8]`、`src channel map job buffer failed`、`failed to map buffer`。
+- 当前实现将 FFmpeg 解码后的 4K NV12 和 1080p 输出放在 `std::vector<uint8_t>`/`FrameBufferPool` 的
+  CPU 虚拟地址中，再用 `wrapbuffer_virtualaddr()` 交给 RGA；四路新缩放路径同时使用“虚拟地址→虚拟地址”，
+  当前板端 RGA MMU/驱动不能映射这类超过 32-bit 可寻址范围的用户态 buffer，因此 `improcess()` 返回 0。
+  同一轮 Scheduler Executor 的 RGA 前处理也出现相同映射错误，说明不是单个缩放矩形参数的问题。
+- 因此 CPU 兜底被频繁触发，4K NV12 整理和 CPU 缩放把四路链路拖到约 10--19 FPS。根本修复方向是让
+  RGA 输入/输出使用可导入的 DMA-BUF/DRM/MPP buffer 并通过 `wrapbuffer_fd()` 或 handle 提交；仅增加
+  RGA 互斥锁不能解决当前的地址映射错误，并发调度应在 buffer 路径修正后再评估。
+
+## 2026-07-21 4K 读取路径改为 MPP NV12 + CPU 2:1 缩放
+
+- 已在 `PullStreamThread` 中接入板端 `h264_rkmpp/hevc_rkmpp` 硬解码，并让 FFmpeg `get_format` 优先选择
+  `AV_PIX_FMT_NV12`。旧版 FFmpeg 若不提供 NV12，仍保留 DRM_PRIME/DMA-BUF 兼容分支；默认 4K 候选走
+  NV12 平面读取，不再把 DMA-BUF RGA 映射作为必经路径。
+- `source.output_width/output_height=1920x1080` 时，读取线程直接从硬解码器 NV12 的 Y/UV 平面做 4K→1080
+  精确 2:1 抽样，避免整张 4K NV12 临时拷贝和逐像素整数除法。输出 Frame 为连续 1080p NV12，后续推理、
+  MPP 编码和 RTMP 推流保持原有路径。
+- DMA-BUF 分支的 RGA 调用已尝试固定到 RGA3；但板端实际仍报 `Failed to map attachment`，并出现
+  `rga2 ... swiotlb buffer is full`，说明四路 4K DMA-BUF 导入会耗尽当前系统映射资源。该分支不作为本次
+  4K 主路径，避免持续重试污染内核 swiotlb；普通 1080p Frame 的 RGA 预处理仍可用。
+- 交叉编译已通过。用户手动启动 SRS 后完成三次 25 秒四路验证，最新日志为
+  `/tmp/alertgateway_4k_4channel_20260721_204036/board.log`：四路均确认 `3840x2160, Format: nv12`，
+  应用日志没有新的 RGA/DMA-BUF/swiotlb 错误，四路结果流均 active，`enc_drop=0`、`out_drop=0`、
+  `write_fail=0`，程序正常 `Done`。
+- 最新稳定窗口实际编码/推流约为 channel 1 `16.6 FPS`、channel 2 `15.3 FPS`、channel 3 `16.5 FPS`、
+  channel 4 `15.4 FPS`；Scheduler NPU 平均约 `26.6 ms`、P95 `28.3 ms`、busy ratio `85%`，各路检测约
+  `6.8--6.9 FPS`。因此本次修改解决了 RGA DMA-BUF 映射错误和花屏风险，但四路 4K 输入仍未达到 30 FPS，
+  当前剩余瓶颈在四路硬解码/CPU 4K 读取缩放/编码总吞吐，不能宣称四路 4K 实时通过。
+- 下一步建议：先按 15 FPS 输入或单路/双路阶梯测试确认解码吞吐上限；若必须四路保持 30 FPS，应进一步
+  采用 MPP/RGA 原生 DMA32 buffer pool 或在输入侧使用硬件媒体管线完成缩放，不能继续依赖当前板端四路
+  DMA-BUF RGA 导入方式。
+
+## 2026-07-21 最新一次四路 4K→1080 启动验证
+
+- 使用 `RUN_SEC=30 CONFIG=config/config_multi_4ch_scheduler_4k_to1080_candidate.json ./run_4k_4channel.sh`
+  再次启动验证，日志为 `/tmp/alertgateway_4k_4channel_20260721_204316/`。SRS 仍由用户手动启动，
+  测试只做前置检查；四路输入和 `alertgateway_channel_1` 至 `_4` 结果流均 active，程序正常 `Done`。
+- 稳定窗口中四路编码/推流约为 `16.5/16.0/16.5/14.9 FPS`，全局 NPU 平均约 `26.9 ms`、P95 约
+  `28.2 ms`、busy ratio 约 `85--88%`；各路无编码丢帧、推流写失败或新的 RGA DMA-BUF 错误。
+- 结论未改变：当前修改已使四路测试稳定运行并消除本次 RGA 映射故障，但四路 4K→1080 仍不能达到
+  30 FPS；后续应继续从硬件媒体缩放/解码带宽方向优化，不能仅继续调 NPU Scheduler。
+
+## 2026-07-21 四路脚本默认配置修正
+
+- `run_4k_4channel.sh` 的默认 `CONFIG` 已从旧的四路 4K 全分辨率候选切换为已验证的
+  `config/config_multi_4ch_scheduler_4k_to1080_candidate.json`。现在在 SRS 已手动启动的前提下，
+  直接执行 `./run_4k_4channel.sh` 即会启动四路 4K 输入、4K→1080 处理、全局 Scheduler 和四路结果推流，
+  不需要额外设置 `CONFIG` 环境变量。
+- 同步修正脚本启动日志和 `run_4k_4channel_to1080.sh` 注释，明确当前路径是 MPP 硬解码/NV12 2:1
+  缩放，不再误称为 RGA 缩放或 4K 全帧处理。
+- 已在不设置 `CONFIG` 的情况下直接执行 `RUN_SEC=20 ./run_4k_4channel.sh` 验证默认入口：默认配置正确选中，
+  四路输入与四路结果流均 active，板端进程正常 `Done`，无编码丢帧、推流写失败或新的 RGA 错误。
+
+## 2026-07-21 四路 4K→1080 卡顿瓶颈复核
+
+- 最新默认入口日志 `/tmp/alertgateway_4k_4channel_20260721_204636/board.log` 与四个发布端日志共同确认：主机四路输入均以约 30 FPS、约 40--44 Mbps 码流复制发布；板端 Pull 完成率却仅为 17.21/15.70/12.61/11.92 FPS，且其后 Encode 与 Stream 的帧率逐路一致，`enc_drop/out_drop/write_fail=0`、队列近零。因此卡顿发生在编码前，不是 SRS 网络、MPP 输出队列或画框开销造成。
+- 该 Pull 指标覆盖 RTMP 读取、`h264_rkmpp` 解码、CPU 可读 NV12 输出和 4K→1080 CPU 2:1 抽样，现有统计尚不能把解码和缩放分别量化；已确认的瓶颈范围应准确表述为“4K 解码后 CPU 可读帧路径”，不能仅凭现有数据把全部责任断言为 CPU 缩放。
+- `EncodeThread` 当前用 `frame_idx * 1000 / cfg_.fps` 生成 H.264 PTS，`cfg_.fps` 固定为 30。实际只生产 12--17 FPS 时，输出媒体时间仍每帧前进约 33 ms，和真实到包节拍不一致；这是播放端更明显卡顿/赶帧的独立次要问题，但不是吞吐下降根因。
+- NPU 是另一条独立限制：全局约 27.7 FPS、每路约 6.9 FPS，故移动目标框约每 143 ms 才更新一次；它会造成框的阶梯感，但因编码输入本身已只有 12--17 FPS，不能解释整幅视频的低帧率。
+- 下一步优先补 Pull 分段计时（读包、送包/取解码帧、4K→1080 缩放、两队列投递）并在同一输入下做“无缩放 4K 拉取”和“单/双/四路”阶梯 A/B；依据结果选择硬件媒体缩放或输入侧降至 1080p。若短期以 15 FPS 输出为目标，还需让编码 PTS 与实际帧率/源 PTS 一致，避免播放器额外的时间轴抖动。
+
+## 2026-07-21 卡顿分析第一轮修改
+
+- `PullStreamThread` 的 4K→1080 精确 2:1 NV12 抽样在 ARM 上增加 NEON `vld2/vld4 + vst1/vst2` 路径，保持原 nearest-neighbor 映射和 CPU 兜底路径不变；目标是降低逐字节标量循环的 CPU/内存访问开销，不重新启用已验证会触发 `swiotlb` 映射耗尽的 DMA-BUF RGA 主路径。
+- Pull 统计新增 `read_avg_ms`、`decode_send_avg_ms`、`decode_receive_avg_ms`、`resize_avg_ms`、`enqueue_avg_ms`，用于下一次板端日志精确切分 RTMP 读包、MPP 解码、CPU 缩放和队列背压；当前尚未取得修改后的板端实测数据。
+- 编码与推流时间轴改为沿用 `Frame::pts_ms`/MPP PTS，并以毫秒为 Stream 时间基，不再使用固定 `pkt_idx_` 宣称 30 FPS；输出 PTS 在每次 RTMP 连接建立后的首个包处归零。该修改只修正实际低帧率时的播放节奏，不会增加处理吞吐。
+- 本轮交叉编译 `AlertGateway` 通过，`git diff --check` 通过；尚未提交或推送。
+- 修改后短测前置检查于本轮返回 `192.168.0.168:1985` connection refused，因此遵守手动 SRS 约定未启动测试发布端或板端进程；板端性能数据待用户手动启动 SRS 后补测。
+
+## 2026-07-21 卡顿分析修改后四路实测
+
+- 用户手动启动 SRS 后，直接运行 `RUN_SEC=20 ./run_4k_4channel.sh`，日志为 `/tmp/alertgateway_4k_4channel_20260721_212522/board.log`；四路输入和四路结果均 active，程序正常 `Done`，测试未启动/重启/停止 SRS。
+- 新增 NEON 路径后的 Pull 分段统计显示四路 `resize_avg_ms` 仅 `1.22--1.26 ms`，`enqueue_avg_ms=0.01 ms`；因此 CPU 4K→1080 缩放和队列背压不是当前主要瓶颈。`decode_send_avg_ms` 为 `6.18/9.92/7.14/9.29 ms`，`decode_receive_avg_ms` 为 `5.37/5.82/5.47/5.54 ms`，结合四路输出仅 `15.66/12.37/17.35/11.51 FPS`，瓶颈进一步收敛到四路并发 MPP 硬解码/共享媒体内存资源竞争及其与其他硬件处理的竞争。
+- NPU 仍稳定为全局约 `27.6 FPS`、各路约 `6.89 FPS`，`npu_p95` 约 `27.8 ms`；编码/推流无失败，说明本轮没有发现 NPU 执行、MPP 编码或 RTMP 写入错误。
+- 新时间戳链路已反映实际到帧间隔，例如 channel 2 的 `pts_delta_ms=118`，不再把低帧率帧伪装成固定 30 FPS；该项改善播放时间轴，但没有把四路吞吐提升到 30 FPS。
+- 结论：NEON 优化验证了缩放不是主瓶颈；下一步不应继续在 CPU 缩放循环上投入，优先做单路/双路/四路硬解阶梯测试，或改用输入侧 1080p/硬件媒体缩放，以确认四路解码资源上限。
+
+## 2026-07-21 1080p 四路脚本复核
+
+- `run_1080p_4channel.sh` 当前使用 1080p 本地文件，但输入 RTMP 地址和等待检查名称仍是 `alertgateway_4k_source_a` 至 `_d`，与四路 4K 脚本复用。脚本的 `wait_stream` 只判断名称 active，不校验 SRS 返回的宽高、发布连接或本次发布者，因此存在残留/并发 4K 发布端导致串流的风险；应改为独立的 `alertgateway_1080p_source_a` 至 `_d` 地址，并在 active 检查中校验 1920x1080。
+- 已有 `/tmp/alertgateway_1080p_4channel_20260721_214753/board.log` 表明本次实际解码为 `1920x1080 nv12`，不是误拉 4K；前约 10 秒输入/输出仅约 12--14 FPS，随后稳定窗口四路约 29.8--30.4 FPS，NPU 各路约 6.9--7.0 FPS、编码/推流无失败。因此“持续不顺畅”不能仅由板端四路 1080p 吞吐解释，需同时排查播放器多路解码/显示和启动阶段 SRS/GOP 缓冲观感。
+- 已按方案修正 `run_1080p_4channel.sh` 与 `config/config_multi_4ch_scheduler_1080p_candidate.json`：输入流改为独立的 `alertgateway_1080p_source_a` 至 `_d`，脚本等待输入 active 时强制校验 SRS 返回的宽高为 `1920x1080`；四路结果地址保持固定 `alertgateway_channel_1` 至 `_4`。`bash -n`、JSON 断言和 `git diff --check` 通过，尚未重新上板测试。
+
+## 2026-07-21 1080p 30 FPS 观感不顺的流程定位
+
+- 当前视频链路没有常规意义上的主动抽帧：1080p 配置 `source.fps=30`、输入源/目标均约 30 FPS 时 `frame_step=1`，`pace_drop=0`；`enc_push` 与 `decoded` 一致，推理队列的 `push_latest` 只覆盖推理帧，不影响编码视频。稳定窗口 `enc_drop/out_drop/write_fail=0` 时也没有证据表明编码或 RTMP 丢帧。
+- 当前 `PullStreamThread` 在解码后用 `steady_clock::now()` 写入 `frame_obj.pts_ms`，见 `src/capture/PullStreamThread.cpp` 的帧构造处；该时间包含解码线程调度抖动，不是输入视频的媒体 PTS。随后 `EncodeThread` 把它传给 MPP，`StreamThread` 又按毫秒时间基直接写入 RTMP。因而即使计数平均 30 FPS，输出帧的 PTS 间隔可能不均匀，播放器在时间戳空洞处保持上一帧，主观上会像“抽帧后插前帧”。
+- 之前固定 `pkt_idx_` 按 30 FPS 生成均匀 PTS，可能掩盖了这种处理节拍抖动；最近改成实时 `Frame::pts_ms` 后，低负载 1080p 场景的时间轴观感可能反而变差。`EncodeStats` 中的 `pts_delta_ms` 是“当前视频帧与最近检测结果的年龄”，不是相邻视频帧 PTS 间隔，不能用它判断视频是否均匀。
+- 修复方向：Pull 应优先保存 `AVFrame::best_effort_timestamp` 按输入 `AVStream::time_base` 换算出的媒体 PTS，并对无效/倒退 PTS 用稳定的 `1/fps` 递增值兜底；`timestamp_ms` 单独保留墙上时钟供运行时事件使用。之后应对 RTMP 输出抓帧/包做 PTS delta 和连续画面重复率 A/B，确认时间轴修复后再决定是否调整多路播放器缓冲。
+
+## 2026-07-21 媒体 PTS 时间轴修复
+
+- `PullStreamThread` 现在优先将 `AVFrame::best_effort_timestamp` 按输入视频 `AVStream::time_base` 换算为毫秒媒体 PTS；无效、倒退或首次缺失时按源帧率和 `frame_step` 使用固定帧间隔兜底。`Frame::timestamp_ms` 单独继续使用墙上时钟，避免媒体时间和事件时间混用。
+- `StreamThread` 增加输出 PTS 单调保护，RTMP 重连或源 PTS 回退时按配置帧率补齐最小步进；`Frame/Encode` 注释已同步为媒体 PTS 语义。
+- 交叉编译 `AlertGateway`、`infer_camera_smoke`、`image_processing_smoke`、`npu_scheduler_smoke` 全部通过，`bash -n` 和 `git diff --check` 通过。修改后 1080p 短测因 SRS API/RTMP 不可访问而未启动，未自动启动或重启 SRS。
+
+## 2026-07-21 修改后四路 1080p 部署状态
+
+- 再次确认当前 `192.168.0.168:1985` API 和 `1935` RTMP 均不可连接，故 `RUN_SEC=20 ./run_1080p_4channel.sh` 在 SRS 前置检查阶段退出；没有启动发布端或板端 AlertGateway 测试进程。
+- 为便于 SRS 恢复后直接测试，已将当前交叉编译产物和 `config/config_multi_4ch_scheduler_1080p_candidate.json` 部署到板端临时路径：
+  `/tmp/AlertGateway.1080p_4channel_20260721_220838` 和
+  `/tmp/alertgateway_1080p_4channel_20260721_220838.json`。本次未启动、停止或重启任何板端进程；正常测试脚本仍会使用自己的隔离临时路径并负责测试结束后的清理。
+- 用户已处理并解决本次 SRS 不可连接导致的测试阻塞问题。后续测试前仍只检查 SRS 是否已由用户手动启动，脚本不自动启动、重启或停止 SRS；尚待下一次测试运行验证连通性。
+
+## 2026-07-21 4K 经 SRS 转码为 1080p 的方案决策
+
+- 用户确认源视频保持 4K，先以原码流推送到 SRS；推荐由 SRS 所在主机联动 FFmpeg，将每路 4K 拉流缩放并编码为 1080p，再发布为独立的 `alertgateway_1080p_source_a` 至 `_d`，板端只拉取和解码 1080p。
+- 推荐链路为：`4K源 -> SRS 4K原码流 -> 主机端FFmpeg转码1080p -> SRS 1080p中间流 -> 板端MPP解码1080p -> NPU推理 -> 1080p输出SRS`。SRS负责媒体转发和调度FFmpeg转码，不是自身直接完成像素缩放；可使用SRS官方 `transcode` 配置，或由外部脚本管理FFmpeg进程。
+- 板端当前 `run_4k_4channel.sh` 路径是另一种方案：SRS转发4K原码流，板端 `h264_rkmpp/hevc_rkmpp` 先完整解码4K，再执行解码后NV12缩放到1080p。因此缩放虽降低NPU、编码和输出带宽压力，但不能绕过四路4K MPP/VPU解码瓶颈。
+- 接入SRS端转码结果时，不能直接同时运行会向同一 `alertgateway_1080p_source_*` 地址发布本地测试文件的 `run_1080p_4channel.sh`；需要使用板端专用启动方式或增加跳过本地发布端的模式，避免同一流名出现多个发布者。
+
+## 2026-07-21 当前代码冗余审查
+
+- 只读审查确认交叉编译相关改动的 `git diff --check` 通过，未发现可直接删除的整段生产链路；当前 `PullStreamThread` 的 DRM_PRIME/RGA 分支虽然不是最新板端 NV12 主路径，但仍是旧版 Rockchip FFmpeg 输出格式的兼容回退，不应在未确认平台范围前删除。
+- 已确认两个明确的清理候选：`StreamThread::pkt_idx_` 仅在重置处读写，实际输出 PTS 已完全使用源媒体时间戳；`Frame::rgb_data` 在工程内没有读写调用，注释也标明暂未使用。`Frame::mutable_data()` 当前同样没有仓内调用，但属于公共数据访问接口，是否删除需结合外部调用方确认。
+- `PullStreamThread::output_buffer_group_` 当前在所有硬件解码通道启动时创建，但实际板端优先选择 NV12，只有收到 DRM_PRIME 且需要缩放时才使用该组；后续可将其改为 DRM 分支内惰性创建，减少当前NV12路径的无用资源申请。`hardware_decode` 字段注释也应同步为“优先NV12，DRM_PRIME兼容回退”。
+- `run_4k_4channel_to1080.sh` 是对 `run_4k_4channel.sh` 的薄封装别名，暂不删除；多份候选 JSON 也暂不按文件名删除，需结合实际测试记录和用户后续使用情况确认。
+
+## 2026-07-21 修改总览可视化文档
+
+- 新增 `docs/本次修改总览.html`，用自包含HTML/CSS流程图展示本次主要改动：4K原码流到板端1080p处理链路、全局NPU Scheduler、多路输入输出管线、媒体PTS修复、问题与性能结论，以及SRS主机端FFmpeg转码方案对比。
+- HTML已完成基础结构检查和 `git diff --check`；文档只读展示项目状态，不改变运行配置或测试行为。
