@@ -166,9 +166,11 @@ AlertGateway/
 │   ├── config_v4l2.json     # V4L2 摄像头配置
 │   ├── config_4k_18mbps.json # 4K pull_stream、18 Mbps 基础配置
 │   ├── config_4k_8mbps.json  # 4K pull_stream、8 Mbps 观看配置
-│   └── config_4k_candidate_20260719.json # 4K 专用模型隔离候选
+│   ├── config_4k_candidate_20260719.json # 4K 专用模型隔离候选
+│   └── config_multi_1080p_candidate.json # 单进程双路 ChannelPipeline 验证配置
 ├── src/
 │   ├── main.cpp
+│   ├── app/ChannelPipeline.cpp # 路级流水线与生命周期管理
 │   ├── common/
 │   │   ├── BlockingQueue.hpp    # 有界阻塞队列
 │   │   └── Frame.hpp            # 帧数据结构（含 pixel_format 字段）
@@ -223,12 +225,16 @@ AlertGateway/
 - `config/config_4k_18mbps.json`：4K `pull_stream` 源、3840×2160、18 Mbps、对应 RTMP 地址，以及 4K 专用的 Thumbnail/ROI/Tiling 开关。
 - `config/config_4k_8mbps.json`：4K `pull_stream` 源、3840×2160、8 Mbps，供高码率播放受限时观看结果流。
 - `config/config_4k_candidate_20260719.json`：独立 4K 专用 RKNN 候选，显式启用已验收的检测框跟踪平滑参数，不能替代 `config/config.json` 的生产入口。
+- `config/config_multi_1080p_candidate.json`：单个 AlertGateway 进程内的双路 1080p 验证配置；两路分别输出到与通道 ID 对应的 RTMP 地址。
 
 切换 4K 时只将 `active_config` 改为 `"config_4k_18mbps.json"`。程序会先加载公共配置，
 再递归合并选中的分配置；视频源、分辨率、码率和图像处理参数均由对应模式配置明确维护。
 
 > `source.type` 可设为 `"v4l2"`（本地摄像头，默认）或 `"pull_stream"`（RTMP/RTSP 拉流）。  
 > 旧版 `camera` 节点继续支持，自动映射为 `source.type=v4l2`，向下兼容。
+
+配置增加 `channels` 数组时，程序会把顶层模型、检测、图像处理、码率和 MQTT 公共字段递归合并到每一路；
+没有 `channels` 的旧配置会自动归一化为单路 `single`，并保持结果地址 `rtmp://192.168.0.168/live/alertgateway`。只有 `channels[]` 多路配置的每个 `fixed_rtmp` 地址必须严格为 `rtmp://192.168.0.168/live/alertgateway_channel_{channel_id}`；`local_flv` 与 `metrics_only` 仍可用于离线或性能验证。
 
 视频源配置示例：
 
@@ -269,7 +275,7 @@ ssh firefly@192.168.0.200 \
 推流统一使用该固定地址，实际 4K 输出尺寸为 3840×2160。恢复 V4L2 测试时，将
 `active_config` 改回 `config_v4l2.json` 并重启程序。
 
-### 一键 4K 候选观看
+### 统一测试入口：注释切换单路、双路和多路
 
 在主机项目根目录运行：
 
@@ -277,21 +283,33 @@ ssh firefly@192.168.0.200 \
 ./run.sh
 ```
 
-`run.sh` 是一次性、隔离的人工观看入口：它固定调用
-`tools/test/run_4k_candidate_on_board.sh`，将
-`runs/input_videos/4k/VID_20260712_131214.mp4` 在 **180 秒测试窗口内循环发布**到
-`live/testsrc2`，再通过 SSH 启动 `192.168.0.200` 板上的
-`config_4k_candidate_20260719.json`。结果始终推送到
-`rtmp://192.168.0.168/live/alertgateway`。
+`run.sh` 是统一的一次性测试入口，当前默认启用单进程双路并发：它将两段 4K 视频在主机侧缩放为
+1920×1080@30 FPS，分别发布到 `live/dual_a` 和 `live/dual_b`，再通过 SSH 在
+`192.168.0.200` 板上启动一个包含两个 `ChannelPipeline` 的 AlertGateway 进程。A 路结果推送到固定地址
+`rtmp://192.168.0.168/live/alertgateway_channel_1` 与
+`rtmp://192.168.0.168/live/alertgateway_channel_2`，并分别使用 `desk/dual/a`、`desk/dual/b` MQTT topic 记录检测数据。
+默认运行 180 秒，每路目标码率为 8 Mbps。
 
-该脚本会先检查视频、SRS API、板端候选文件和已有 `AlertGateway` 进程；已有板端进程时会终止本次启动，
+需要切换测试类型时，直接编辑 `run.sh` 的注释：单路测试取消单路 `exec` 注释并注释双路
+`exec`；未来多路测试新增对应脚本后按同样方式切换。不要同时保留多个未注释的 `exec`，也不增加命令行参数。
+
+该脚本首先检查 SRS 的 HTTP API `1985` 和 RTMP `1935`。SRS 必须由用户在 Windows 上手动启动，
+并使用唯一的 `console.conf` 实例；SRS 未就绪时脚本会暂停，等待用户手动启动后按 Enter 重试，
+输入 `q` 可退出。测试脚本不会启动、重启或停止 SRS，也不会在 SRS 确认前启动 FFmpeg、板端
+`AlertGateway` 或其他测试进程。随后脚本再检查视频、板端候选文件和已有 `AlertGateway` 进程；已有板端进程时会拒绝启动，
 不会擅自杀掉其他测试。发生发布、拉流、推理、编码或回推错误时，完整调试日志保留在
-`/tmp/alertgateway_4k_时间戳/`。需要更换视频或时长时，直接调用底层脚本：
+`/tmp/alertgateway_multi_时间戳/`。需要更换视频、时长或参数时，可通过环境变量调用底层脚本：
 
 ```bash
-tools/test/run_4k_candidate_on_board.sh \
-  runs/input_videos/4k/VID_20260712_131214.mp4 180
+VIDEO_A=runs/input_videos/4k/VID_20260712_131214.mp4 \
+VIDEO_B=runs/input_videos/4k/VID_20260712_131410.mp4 \
+RUN_SEC=180 tools/test/run_multi_candidate_on_board.sh
 ```
+
+多路代码已完成交叉编译，并已在 .200 板完成一次 180 秒单进程双路实流验收：A 路固定结果流为
+H.264 Main 1920×1080，B 路本地 FLV 为 1920×1080@30 FPS；两路均无
+`enc_drop`、`out_drop` 或 `write_fail`。下一步是补充 MQTT 消息留证后，再以资源数据决定
+4K+1080p 或三路压测方案。
 
 `start.sh` 与此不同：它应在**板端** `~/AlertGateway` 目录执行，后台启动该目录中的
 `AlertGateway config/config.json`，并管理 performance 锁频服务，适用于常驻运行：

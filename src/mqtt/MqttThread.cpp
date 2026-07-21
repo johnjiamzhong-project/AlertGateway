@@ -28,9 +28,11 @@ void MqttThread::run() {
 
     try {
         client.connect(opts)->wait();
-        std::cout << "MqttThread: connected to " << server_uri << "\n";
+        std::cout << "[channel=" << cfg_.channel_id << "] MqttThread: connected to "
+                  << server_uri << "\n";
     } catch (const std::exception& e) {
-        std::cerr << "MqttThread: connect failed: " << e.what() << "\n";
+        std::cerr << "[channel=" << cfg_.channel_id << "] MqttThread: connect failed: "
+                  << e.what() << "\n";
         return;
     }
 
@@ -41,7 +43,8 @@ void MqttThread::run() {
         try {
             client.publish(cfg_.topic, payload, 0, false)->wait();
         } catch (const std::exception& e) {
-            std::cerr << "MqttThread: publish failed: " << e.what() << "\n";
+            std::cerr << "[channel=" << cfg_.channel_id << "] MqttThread: publish failed: "
+                      << e.what() << "\n";
         }
     }
 

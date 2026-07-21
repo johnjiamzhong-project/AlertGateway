@@ -13,7 +13,17 @@ extern "C" {
 #include "common/BlockingQueue.hpp"
 #include "common/Frame.hpp"
 
+enum class StreamSinkType {
+    FixedRtmp,
+    LocalFlv,
+    MetricsOnly,
+};
+
+const char* stream_sink_name(StreamSinkType sink);
+
 struct StreamConfig {
+    std::string channel_id = "single";
+    StreamSinkType sink = StreamSinkType::FixedRtmp;
     std::string rtmp_url;
     int width;
     int height;

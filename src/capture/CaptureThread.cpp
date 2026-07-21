@@ -35,8 +35,10 @@ double fps_from_timeperframe(const v4l2_fract& tpf) {
 
 CaptureThread::CaptureThread(const CameraConfig& cfg,
                              BlockingQueue<Frame>& enc_queue,
-                             BlockingQueue<Frame>& infer_queue)
-    : cfg_(cfg), enc_queue_(enc_queue), infer_queue_(infer_queue) {}
+                             BlockingQueue<Frame>& infer_queue,
+                             std::shared_ptr<FrameBufferPool> frame_pool)
+    : cfg_(cfg), enc_queue_(enc_queue), infer_queue_(infer_queue),
+      frame_pool_(frame_pool ? std::move(frame_pool) : std::make_shared<FrameBufferPool>(4)) {}
 
 CaptureThread::~CaptureThread() { stop(); }
 
@@ -87,6 +89,7 @@ void CaptureThread::run() {
         // 将 mmap 缓冲区数据拷贝到 Frame（YUYV422 格式，宽×高×2 字节）
         // 拷贝后立即归还缓冲区（VIDIOC_QBUF），内核可继续复用此缓冲区采集下一帧
         const auto* src = static_cast<const uint8_t*>(buffers_[buf.index].start);
+        frame.raw_data = frame_pool_->acquire(buf.bytesused);
         frame.raw_data.assign(src, src + buf.bytesused);
 
         // 向 InferThread 投递帧副本，非阻塞（timeout=0）

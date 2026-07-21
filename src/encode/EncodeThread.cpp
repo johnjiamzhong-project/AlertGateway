@@ -231,6 +231,57 @@ void EncodeThread::draw_rect_nv12(uint8_t* nv12, int w, int h,
     }
 }
 
+// 这是渲染前的只读审计，不参与 NMS、Tile 合并或 Tracker 关联。它记录的是即将画到
+// 当前视频帧上的最终显示快照，因此可用于区分“前级已重复”与“跟踪/对齐后重新重叠”。
+void EncodeThread::audit_render_overlaps(const DisplayDetections& display, const Frame& frame) {
+    if (!cfg_.render_overlap_audit || display.detections.size() < 2) return;
+    if (display.detection_frame_id == last_audited_detection_frame_id_ &&
+        display.detection_pts_ms == last_audited_detection_pts_ms_) {
+        return;
+    }
+    last_audited_detection_frame_id_ = display.detection_frame_id;
+    last_audited_detection_pts_ms_ = display.detection_pts_ms;
+
+    const float min_intersection_area = std::max(0.0f, cfg_.render_overlap_min_intersection_area_px);
+    for (size_t i = 0; i < display.detections.size(); ++i) {
+        const Detection& a = display.detections[i];
+        const float a_width = std::max(0.0f, a.x2 - a.x1);
+        const float a_height = std::max(0.0f, a.y2 - a.y1);
+        const float a_area = a_width * a_height;
+        for (size_t j = i + 1; j < display.detections.size(); ++j) {
+            const Detection& b = display.detections[j];
+            const float ix1 = std::max(a.x1, b.x1);
+            const float iy1 = std::max(a.y1, b.y1);
+            const float ix2 = std::min(a.x2, b.x2);
+            const float iy2 = std::min(a.y2, b.y2);
+            const float intersection_width = std::max(0.0f, ix2 - ix1);
+            const float intersection_height = std::max(0.0f, iy2 - iy1);
+            const float intersection_area = intersection_width * intersection_height;
+            if (intersection_area <= min_intersection_area) continue;
+
+            const float b_area = std::max(0.0f, b.x2 - b.x1) * std::max(0.0f, b.y2 - b.y1);
+            const float union_area = a_area + b_area - intersection_area;
+            const float smaller_area = std::min(a_area, b_area);
+            const float iou = union_area > 0.0f ? intersection_area / union_area : 0.0f;
+            const float ios = smaller_area > 0.0f ? intersection_area / smaller_area : 0.0f;
+            std::cout << "[RenderOverlap] channel=" << cfg_.channel_id
+                      << " video_frame=" << frame.frame_id
+                      << " video_pts_ms=" << frame.pts_ms
+                      << " detection_frame=" << display.detection_frame_id
+                      << " detection_pts_ms=" << display.detection_pts_ms
+                      << " pts_delta_ms=" << display.pts_delta_ms
+                      << " pair=" << i << ',' << j
+                      << " a={class_id=" << a.class_id << ",label=" << a.label
+                      << ",score=" << a.score << ",box=" << a.x1 << ',' << a.y1 << ',' << a.x2 << ',' << a.y2 << '}'
+                      << " b={class_id=" << b.class_id << ",label=" << b.label
+                      << ",score=" << b.score << ",box=" << b.x1 << ',' << b.y1 << ',' << b.x2 << ',' << b.y2 << '}'
+                      << " intersection={box=" << ix1 << ',' << iy1 << ',' << ix2 << ',' << iy2
+                      << ",area=" << intersection_area << '}'
+                      << " iou=" << iou << " ios=" << ios << "\n" << std::flush;
+        }
+    }
+}
+
 void EncodeThread::draw_solid_rect_nv12(uint8_t* nv12, int w, int h,
                                          int x1, int y1, int x2, int y2,
                                          uint8_t yv, uint8_t uv, uint8_t vv) {
@@ -508,6 +559,7 @@ void EncodeThread::run() {
 
         // 当前帧先完整写入 DRM buffer，再叠加与其 PTS 对齐的检测结果。
         const auto display = shared_dets_.get_for_pts(frame.pts_ms);
+        audit_render_overlaps(display, frame);
         const int detection_box_thickness = (w >= 3840 && h >= 2160) ? 6 : 2;
         for (const auto& det : display.detections) {
             draw_rect_nv12(drm_ptr, w, h,
@@ -599,7 +651,8 @@ void EncodeThread::run() {
         if (elapsed >= 10.0) {
             const double avg_ms = input_frames == 0 ? 0.0
                 : (processing_us / 1000.0) / static_cast<double>(input_frames);
-            std::cerr << "[EncodeStats] input_fps=" << (input_frames / elapsed)
+            std::cerr << "[EncodeStats] channel=" << cfg_.channel_id
+                      << " input_fps=" << (input_frames / elapsed)
                       << " packet_fps=" << (encoded_packets / elapsed)
                       << " bitrate_kbps=" << (encoded_bytes * 8.0 / elapsed / 1000.0)
                       << " avg_process_ms=" << avg_ms

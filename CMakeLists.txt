@@ -46,6 +46,7 @@ set(RGA_LIB ${CMAKE_SOURCE_DIR}/third_party/rga/lib/librga.so.2.1.0)
 # ── Sources ───────────────────────────────────────────────────────────────────
 set(SOURCES
     src/main.cpp
+    src/app/ChannelPipeline.cpp
     src/capture/CaptureThread.cpp
     src/capture/PullStreamThread.cpp
     src/infer/RoiFilter.cpp

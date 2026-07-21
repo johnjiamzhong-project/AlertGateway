@@ -4,6 +4,23 @@
 #include <cstring>
 #include <chrono>
 
+const char* stream_sink_name(StreamSinkType sink) {
+    switch (sink) {
+    case StreamSinkType::FixedRtmp: return "fixed_rtmp";
+    case StreamSinkType::LocalFlv: return "local_flv";
+    case StreamSinkType::MetricsOnly: return "metrics_only";
+    }
+    return "unknown";
+}
+
+namespace {
+
+std::string channel_tag(const StreamConfig& cfg) {
+    return "[channel=" + cfg.channel_id + "] ";
+}
+
+}  // namespace
+
 // 只保存引用/配置，不做网络/FFmpeg初始化——真正连接推迟到 start()。
 StreamThread::StreamThread(const StreamConfig& cfg, BlockingQueue<EncodedPacket>& in_queue)
     : cfg_(cfg), in_queue_(in_queue) {}
@@ -15,11 +32,14 @@ StreamThread::~StreamThread() { stop(); }
 // 连接失败直接抛异常终止启动——推流是流水线终点，连不上没有降级方案。
 // 成功后置 running_=true 并起 run() 所在的工作线程。
 void StreamThread::start() {
-    int ret = avformat_network_init();
-    if (ret < 0)
-        throw std::runtime_error("StreamThread: avformat_network_init failed");
-    if (!open_rtmp())
-        throw std::runtime_error("StreamThread: failed to connect " + cfg_.rtmp_url);
+    if (cfg_.sink == StreamSinkType::FixedRtmp) {
+        int ret = avformat_network_init();
+        if (ret < 0)
+            throw std::runtime_error("StreamThread: avformat_network_init failed");
+    }
+    if (cfg_.sink != StreamSinkType::MetricsOnly && !open_rtmp()) {
+        throw std::runtime_error("StreamThread: failed to open " + cfg_.rtmp_url);
+    }
     running_ = true;
     thread_ = std::thread(&StreamThread::run, this);
 }
@@ -55,7 +75,9 @@ bool StreamThread::open_rtmp() {
     st->time_base             = AVRational{1, cfg_.fps};
 
     AVDictionary* opts = nullptr;
-    av_dict_set_int(&opts, "rtmp_buffer_size", 0, 0);  // 禁用 RTMP 客户端缓冲
+    if (cfg_.sink == StreamSinkType::FixedRtmp) {
+        av_dict_set_int(&opts, "rtmp_buffer_size", 0, 0);  // 禁用 RTMP 客户端缓冲
+    }
     ret = avio_open2(&ctx->pb, cfg_.rtmp_url.c_str(), AVIO_FLAG_WRITE, nullptr, &opts);
     av_dict_free(&opts);
     if (ret < 0) { avformat_free_context(ctx); return false; }
@@ -217,10 +239,11 @@ void StreamThread::reconnect_loop() {
             if (!sps_.empty() && !pps_.empty()) {
                 write_extradata(sps_.data(), sps_.size(), pps_.data(), pps_.size());
             }
-            std::cout << "StreamThread: reconnected to " << cfg_.rtmp_url << "\n";
+            std::cout << channel_tag(cfg_) << "StreamThread: reconnected to "
+                      << cfg_.rtmp_url << "\n";
             return;
         }
-        std::cerr << "StreamThread: reconnect failed, retry in 3s\n";
+        std::cerr << channel_tag(cfg_) << "StreamThread: reconnect failed, retry in 3s\n";
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
         while (running_ && std::chrono::steady_clock::now() < deadline) {
             EncodedPacket discard;
@@ -247,7 +270,8 @@ void StreamThread::run() {
             // 5s 内没有成功写包，检查 AVIO 错误标志
             if (header_written_ && clk::now() - last_ok > std::chrono::seconds(5)) {
                 if (fmt_ctx_->pb->error < 0) {
-                    std::cerr << "StreamThread: connection lost (heartbeat), reconnecting...\n";
+                    std::cerr << channel_tag(cfg_)
+                              << "StreamThread: connection lost (heartbeat), reconnecting...\n";
                     reconnect_loop();
                     last_ok = clk::now();
                 }
@@ -255,9 +279,13 @@ void StreamThread::run() {
             continue;
         }
 
-        if (!write_packet(ep)) {
+        if (cfg_.sink == StreamSinkType::MetricsOnly) {
+            ++written_packets;
+            written_bytes += ep.data.size();
+            last_ok = clk::now();
+        } else if (!write_packet(ep)) {
             ++write_failures;
-            std::cerr << "StreamThread: write failed, reconnecting...\n";
+            std::cerr << channel_tag(cfg_) << "StreamThread: write failed, reconnecting...\n";
             reconnect_loop();
             last_ok = clk::now();
         } else {
@@ -268,7 +296,9 @@ void StreamThread::run() {
 
         const double elapsed = std::chrono::duration<double>(clk::now() - stats_t).count();
         if (elapsed >= 10.0) {
-            std::cerr << "[StreamStats] output_fps=" << (written_packets / elapsed)
+            std::cerr << "[StreamStats] channel=" << cfg_.channel_id
+                      << " sink=" << stream_sink_name(cfg_.sink)
+                      << " output_fps=" << (written_packets / elapsed)
                       << " bitrate_kbps=" << (written_bytes * 8.0 / elapsed / 1000.0)
                       << " write_fail=" << write_failures
                       << " queue=" << in_queue_.size()

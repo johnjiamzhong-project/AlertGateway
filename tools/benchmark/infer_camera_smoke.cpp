@@ -47,20 +47,21 @@ int main(int argc, char** argv) {
         json cfg;
         config_file >> cfg;
 
-        CameraConfig camera{
-            cfg["camera"]["device"].get<std::string>(),
-            cfg["camera"]["width"].get<int>(),
-            cfg["camera"]["height"].get<int>(),
-            cfg["camera"]["fps"].get<int>()
-        };
-        ModelConfig model{
-            cfg["model"]["path"].get<std::string>(),
-            cfg["model"]["conf_threshold"].get<float>(),
-            cfg["model"]["iou_threshold"].get<float>(),
-            cfg["detection"]["target_classes"].get<std::vector<std::string>>(),
-            cfg["model"].value("infer_every_n_frames", 1),
-            cfg["model"].value("output_layout", std::string("decoded"))
-        };
+        CameraConfig camera{};
+        camera.channel_id = "infer_camera_smoke";
+        camera.device = cfg["camera"]["device"].get<std::string>();
+        camera.width = cfg["camera"]["width"].get<int>();
+        camera.height = cfg["camera"]["height"].get<int>();
+        camera.fps = cfg["camera"]["fps"].get<int>();
+
+        ModelConfig model{};
+        model.channel_id = "infer_camera_smoke";
+        model.path = cfg["model"]["path"].get<std::string>();
+        model.conf_threshold = cfg["model"]["conf_threshold"].get<float>();
+        model.iou_threshold = cfg["model"]["iou_threshold"].get<float>();
+        model.target_classes = cfg["detection"]["target_classes"].get<std::vector<std::string>>();
+        model.infer_every_n_frames = cfg["model"].value("infer_every_n_frames", 1);
+        model.output_layout = cfg["model"].value("output_layout", std::string("decoded"));
         DetectionConfig detection{
             cfg["detection"].value("report_interval_sec", 1)
         };

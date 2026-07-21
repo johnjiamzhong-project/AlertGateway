@@ -1,0 +1,36 @@
+{
+  "active_config": "config_4k_candidate_20260719.json",
+  "source": {
+    "type": "pull_stream",
+    "url": "rtmp://192.168.0.168/live/testsrc2",
+    "width": 3840,
+    "height": 2160,
+    "fps": 30,
+    "reconnect_sec": 5
+  },
+  "stream": {
+    "rtmp_url": "rtmp://192.168.0.168/live/alertgateway",
+    "bitrate_kbps": 18000,
+    "draw_detection_labels": true,
+    "detection_alignment_delay_frames": 3,
+    "render_overlap_audit": true,
+    "render_overlap_min_intersection_area_px": 1.0
+  },
+  "image_processing": {
+    "roi": {
+      "enabled": true,
+      "regions": [
+        {"id": "full-frame-roi", "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+      ],
+      "filter_outside": true,
+      "track_dwell_sec": 0
+    },
+    "tiling": {
+      "enabled": true,
+      "grid_cols": 2,
+      "grid_rows": 1,
+      "overlap_ratio": 0.12,
+      "merge_iou_threshold": 0.45
+    }
+  }
+}

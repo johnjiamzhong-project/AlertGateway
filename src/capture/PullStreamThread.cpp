@@ -50,22 +50,24 @@ static void copy_nv12(const AVFrame* src, uint8_t* dst, int w, int h) {
 
 PullStreamThread::PullStreamThread(const PullStreamConfig& cfg,
                                  BlockingQueue<Frame>& enc_queue,
-                                 BlockingQueue<Frame>& infer_queue)
-    : cfg_(cfg), enc_queue_(enc_queue), infer_queue_(infer_queue) {
-    // 初始化 FFmpeg 网络库（新版 FFmpeg 中此函数是幂等且线程安全的）
-    avformat_network_init();
-}
+                                 BlockingQueue<Frame>& infer_queue,
+                                 std::shared_ptr<FrameBufferPool> frame_pool)
+    : cfg_(cfg), enc_queue_(enc_queue), infer_queue_(infer_queue),
+      frame_pool_(std::move(frame_pool)) {}
 
 PullStreamThread::~PullStreamThread() {
     stop();
-    avformat_network_deinit();
+}
+
+std::string PullStreamThread::log_tag() const {
+    return "[channel=" + cfg_.channel_id + "] ";
 }
 
 void PullStreamThread::start() {
     if (running_) return;
     running_ = true;
     thread_ = std::thread(&PullStreamThread::run, this);
-    std::cout << "[PullStream] Started pulling from: " << cfg_.url << "\n" << std::flush;
+    std::cout << log_tag() << "[PullStream] Started pulling from: " << cfg_.url << "\n" << std::flush;
 }
 
 void PullStreamThread::stop() {
@@ -74,7 +76,7 @@ void PullStreamThread::stop() {
     if (thread_.joinable()) {
         thread_.join();
     }
-    std::cout << "[PullStream] Stopped pull stream thread.\n" << std::flush;
+    std::cout << log_tag() << "[PullStream] Stopped pull stream thread.\n" << std::flush;
 }
 
 void PullStreamThread::run() {
@@ -90,13 +92,15 @@ void PullStreamThread::run() {
     uint64_t infer_pushed = 0;
     uint64_t infer_dropped = 0;
     uint64_t paced_dropped = 0;
+    int mismatch_count = 0;
+    int warn_count = 0;
     auto stats_t = std::chrono::steady_clock::now();
 
     while (running_) {
         // 1. 尝试打开输入流
         AVFormatContext* format_ctx = avformat_alloc_context();
         if (!format_ctx) {
-            std::cerr << "[PullStream] avformat_alloc_context failed\n";
+            std::cerr << log_tag() << "[PullStream] avformat_alloc_context failed\n";
             break;
         }
         format_ctx->interrupt_callback.callback = interrupt_callback;
@@ -108,7 +112,7 @@ void PullStreamThread::run() {
         av_dict_set(&options, "stimeout", "5000000", 0);
         av_dict_set(&options, "rw_timeout", "5000000", 0);
 
-        std::cout << "[PullStream] Connecting to " << cfg_.url << "...\n" << std::flush;
+        std::cout << log_tag() << "[PullStream] Connecting to " << cfg_.url << "...\n" << std::flush;
         int ret = avformat_open_input(&format_ctx, cfg_.url.c_str(), nullptr, &options);
         if (options) {
             av_dict_free(&options);
@@ -117,7 +121,7 @@ void PullStreamThread::run() {
         if (ret < 0) {
             char err_buf[256];
             av_strerror(ret, err_buf, sizeof(err_buf));
-            std::cerr << "[PullStream] avformat_open_input failed: " << err_buf
+            std::cerr << log_tag() << "[PullStream] avformat_open_input failed: " << err_buf
                       << ". Retrying in " << cfg_.reconnect_sec << "s...\n" << std::flush;
 
             // 重试延迟退避
@@ -190,7 +194,8 @@ void PullStreamThread::run() {
         if (source_fps > 0.0 && target_fps > 0) {
             frame_step = std::max(1, (int)std::round(source_fps / target_fps));
         }
-        std::cout << "[PullStream] source_fps=" << (int)std::round(source_fps)
+        std::cout << "[PullStream] channel=" << cfg_.channel_id
+                  << " source_fps=" << (int)std::round(source_fps)
                   << " target_fps=" << target_fps
                   << " frame_step=" << frame_step << "\n" << std::flush;
 
@@ -218,9 +223,8 @@ void PullStreamThread::run() {
                     int w = frame->width;
                     int h = frame->height;
                     if (w != cfg_.width || h != cfg_.height || (w & 1) || (h & 1)) {
-                        static int mismatch_count = 0;
                         if (mismatch_count++ % 30 == 0) {
-                            std::cerr << "[PullStream] Decoded resolution " << w << "x" << h
+                            std::cerr << log_tag() << "[PullStream] Decoded resolution " << w << "x" << h
                                       << " does not match configured source " << cfg_.width
                                       << "x" << cfg_.height << "; dropping frame\n" << std::flush;
                         }
@@ -243,7 +247,7 @@ void PullStreamThread::run() {
                     frame_obj.height = h;
                     frame_obj.frame_id = ++next_frame_id;
                     frame_obj.pixel_format = PixelFormat::NV12;
-                    frame_obj.raw_data.resize(frame_size);
+                    frame_obj.raw_data = frame_pool_->acquire(frame_size);
                     frame_obj.pts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now().time_since_epoch()).count();
                     frame_obj.timestamp_ms = frame_obj.pts_ms;
@@ -255,9 +259,8 @@ void PullStreamThread::run() {
                         copy_nv12(frame, frame_obj.raw_data.data(), w, h);
                     } else {
                         // 如果有其他非常规格式，打印警告并跳过（RK3588 MPP 解码或常规 RTSP 多为上述两者）
-                        static int warn_cnt = 0;
-                        if (warn_cnt++ % 100 == 0) {
-                            std::cerr << "[PullStream] Warning: Unsupported frame format "
+                        if (warn_count++ % 100 == 0) {
+                            std::cerr << log_tag() << "[PullStream] Warning: Unsupported frame format "
                                       << frame->format << " (" << av_get_pix_fmt_name((AVPixelFormat)frame->format)
                                       << "). Skipping...\n" << std::flush;
                         }
@@ -286,7 +289,8 @@ void PullStreamThread::run() {
                     auto now = std::chrono::steady_clock::now();
                     const double elapsed = std::chrono::duration<double>(now - stats_t).count();
                     if (elapsed >= 10.0) {
-                        std::cout << "[PullStats] input_fps=" << (decoded_frames / elapsed)
+                        std::cout << "[PullStats] channel=" << cfg_.channel_id
+                                  << " input_fps=" << (decoded_frames / elapsed)
                                   << " decoded=" << decoded_frames
                                   << " enc_push=" << enc_pushed
                                   << " enc_drop=" << enc_dropped
@@ -307,7 +311,7 @@ void PullStreamThread::run() {
         // 6. 连接断开清理，准备下一轮重连
         avcodec_free_context(&codec_ctx);
         avformat_close_input(&format_ctx);
-        std::cout << "[PullStream] Connection closed. Reconnecting...\n" << std::flush;
+        std::cout << log_tag() << "[PullStream] Connection closed. Reconnecting...\n" << std::flush;
     }
 
     av_packet_free(&packet);

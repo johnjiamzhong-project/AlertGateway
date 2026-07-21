@@ -2,6 +2,61 @@
 #include <vector>
 #include <string>
 #include <cstdint>
+#include <memory>
+#include <utility>
+
+// 帧像素数据的共享容器。
+// Frame 会同时进入编码和推理队列，复制 Frame 时只增加引用计数，不复制整帧像素。
+// 生产者完成填充后，消费者只读该数据；需要独立可写缓冲区的 ROI Tiling 仍显式创建新对象。
+class SharedByteBuffer {
+public:
+    SharedByteBuffer() = default;
+    explicit SharedByteBuffer(std::shared_ptr<std::vector<uint8_t>> storage)
+        : storage_(std::move(storage)) {}
+
+    void resize(size_t size) {
+        ensure_storage();
+        storage_->resize(size);
+    }
+
+    void resize(size_t size, uint8_t value) {
+        ensure_storage();
+        storage_->resize(size, value);
+    }
+
+    void assign(const uint8_t* first, const uint8_t* last) {
+        ensure_storage();
+        storage_->assign(first, last);
+    }
+
+    size_t size() const { return storage_ ? storage_->size() : 0; }
+    bool empty() const { return size() == 0; }
+
+    uint8_t* data() {
+        ensure_storage();
+        return storage_->data();
+    }
+
+    const uint8_t* data() const {
+        return storage_ ? storage_->data() : nullptr;
+    }
+
+    uint8_t& operator[](size_t index) {
+        ensure_storage();
+        return (*storage_)[index];
+    }
+
+    const uint8_t& operator[](size_t index) const {
+        return (*storage_)[index];
+    }
+
+private:
+    void ensure_storage() {
+        if (!storage_) storage_ = std::make_shared<std::vector<uint8_t>>();
+    }
+
+    std::shared_ptr<std::vector<uint8_t>> storage_;
+};
 
 // 帧像素格式：YUYV (V4L2 采集) 或 NV12 (FFmpeg 解码)
 enum class PixelFormat {
@@ -20,10 +75,10 @@ struct Detection {
 };
 
 // 一帧画面的完整载体，在 CaptureThread → InferThread / EncodeThread 之间流转。
-// raw_data 由 V4L2 mmap 拷贝填入；rgb_data 由 EncodeThread 在 YUYV→NV12
+// raw_data 由 V4L2 mmap 拷贝填入；其底层存储在编码/推理队列间共享；rgb_data 由 EncodeThread 在 YUYV→NV12
 // 转换过程中顺带生成，供调试或未来扩展使用（当前叠框直接在 NV12 上操作）。
 struct Frame {
-    std::vector<uint8_t> raw_data;      // V4L2 采集的原始 YUYV422 数据，或拉流解码后的 NV12 数据
+    SharedByteBuffer raw_data;          // V4L2 采集的原始 YUYV422 数据，或拉流解码后的 NV12 数据
     std::vector<uint8_t> rgb_data;      // 转换后的 RGB24 数据（原始分辨率，暂未使用）
     int     width        = 0;
     int     height       = 0;

@@ -19,6 +19,7 @@
 #include "infer/ThumbnailTask.hpp"
 
 struct ModelConfig {
+    std::string channel_id = "single";
     std::string path;
     float conf_threshold;
     float iou_threshold;
@@ -72,7 +73,7 @@ public:
 private:
     void run();
     bool load_model();
-    std::vector<Detection> infer_once(const Frame& frame);
+    std::vector<Detection> infer_once(const Frame& frame, const TileRect* region = nullptr);
     std::string summarize(const std::vector<Detection>& dets,
                           const Thumbnail* thumbnail,
                           const std::vector<RoiEvent>* events);

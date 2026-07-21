@@ -7,6 +7,7 @@
 - [4K 拉流图像处理方案](4k_pull_stream_image_processing_plan.md): 单路 4K 流水线设计、ROI、切片和图像处理扩展点.
 - [4K 准确率微调与 INT8 校准](4k_accuracy_finetune_and_int8_calibration.md): 从已有 4K 视频按 1 FPS 抽帧、标注、按视频划分数据集、WSL 微调、量化校准和板端验收的执行规范。
 - [先单路性能、再多路并发的学习计划](4K单路性能与多路并发学习计划.md): 当前学习阶段的详细执行计划：180 秒单路基线、日志判读、单变量验收门槛与两路 PoC 边界。
+- [单路、双路与多路兼容开发计划](单路双路多路兼容开发计划.md): 将单路流水线抽象为可复用的路级 pipeline，兼容旧配置并逐步支持双路和多路。
 - [4K 架构图](../architecture/alertgateway_architecture.svg): 输入源、SRS、RK3588 推理、MPP 编码和输出流程.
 
 ## 推流、帧率与码率验证
@@ -25,3 +26,6 @@
 - 12 Mbps: 12007.9 kbps, 29.99 FPS, PSNR 28.4200 dB, SSIM 0.5735.
 - 18 Mbps: 18087.0 kbps, 30.08 FPS, PSNR 28.4099 dB, SSIM 0.5813.
 - 两组测试写入失败数和队列深度均为 0。单帧对齐样本中 18 Mbps 的 SSIM 略有优势；12 Mbps 仍是更节省带宽的选项。
+- 2026-07-20 已完成单进程双路 1080p 180 秒 PoC：`dual_a` 固定推理结果输出为 H.264 Main
+  1920×1080，`dual_b` 写入 159.867 秒的 1920×1080@30 FPS 本地 FLV；两路
+  `enc_drop/out_drop/write_fail` 均为 0。详见[单路、双路与多路兼容开发计划](单路双路多路兼容开发计划.md)的实施状态。

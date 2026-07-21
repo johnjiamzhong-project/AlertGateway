@@ -1716,3 +1716,233 @@ The first automated 12/18 Mbps report was invalid because it used the old AlertG
   已验收的 `config_4k_18mbps.json`；8 Mbps 基础配置保留为网络受限时的手动降级选项。该变更仅影响 4K
   专用候选，不改 `config/config.json`、V4L2 生产模型、模型参数或固定结果流；下一步只需同步候选配置至
   `.200`，不启动双路测试。
+- 2026-07-20 用户要求先进入双路验证，已将根目录 `run.sh` 改为调用新增的
+  `tools/test/run_dual_candidate_on_board.sh`。该脚本默认启动两路 1920×1080@30 FPS：主机将两段视频分别
+  发布到 `live/dual_a` 与 `live/dual_b`，板端启动两个独立的临时完整配置；A 路结果使用固定地址
+  `rtmp://192.168.0.168/live/alertgateway`，B 路写入板端 `/tmp` 临时 FLV，不创建第二个结果 RTMP 地址。
+  两路使用独立 MQTT topic、配置、日志和输入快照，默认每路目标 8 Mbps、运行 180 秒。当前已通过
+  `bash -n` 和 `git diff --check`，尚未进行板端实流验收；生产 `config/config.json`、源码和固定 RTMP
+  规则未改变。
+- 随后用户明确要求统一入口兼容单路、双路和后续多路，且不增加命令行参数。已将 `run.sh` 改为注释切换
+  结构：当前仅双路 `exec` 生效，单路 `run_4k_candidate_on_board.sh` 和未来多路脚本作为注释候选，
+  切换时只允许保留一个未注释的 `exec`。`start.sh` 和底层单路脚本仍保持可用。
+- 用户要求将代码层面的单路/双路/多路兼容方案整理成开发计划，已新增
+  `docs/4k/单路双路多路兼容开发计划.md` 并加入 4K 文档索引。计划确定先保留旧平面配置兼容，再引入
+  `channels[]`、路级 `ChannelPipeline`、独立队列/跟踪/资源/日志与明确输出 sink；先做双路 1080p，再做
+  4K+1080p，最后按资源证据扩展多路。当前仍未改动 C++ 实现。
+- 已按计划完成首版 C++ 多通道实现并通过全量交叉编译：`main.cpp` 将旧平面配置归一化为 `single` 或解析
+  `channels[]`，新增 `src/app/ChannelPipeline` 让每路拥有独立 source、队列、RKNN、MPP、输出、MQTT 与
+  `SharedDetections`。输出新增 `fixed_rtmp`、`local_flv`、`metrics_only` sink，进程内最多一路可使用固定
+  RTMP 地址；Pull/Infer/Track/Encode/Stream 统计与 MQTT 消息携带 `channel_id`。新增
+  `config/config_multi_1080p_candidate.json` 和 `tools/test/run_multi_candidate_on_board.sh`，根目录 `run.sh`
+  当前默认调用该单进程双路入口。当时尚未向 `.200` 部署或进行双路实流验收；共享 NPU 调度仍未实现，
+  且未改变 V4L2 生产入口、模型、阈值或固定输出地址。
+- 2026-07-20 已将最新多通道二进制部署至 `.200`，使用 `VID_20260712_131214.mp4` 和
+  `VID_20260712_131410.mp4` 分别发布到 `rtmp://192.168.0.168/live/dual_a` 与
+  `rtmp://192.168.0.168/live/dual_b`，完成一次 180 秒单进程双路 1080p PoC。A 路固定结果流
+  `rtmp://192.168.0.168/live/alertgateway` 在运行中经 SRS 确认为 H.264 Main 1920×1080；B 路
+  本地 FLV 为 160,301,166 字节、159.867 秒、1920×1080@30 FPS。两路末尾
+  `enc_drop=0`、`out_drop=0`、`write_fail=0`，队列无持续积压；有效推理样本显示 A/B 总耗时均值约
+  41.56/42.04 ms、P90 约 54.74/54.87 ms，说明首个可见压力是双路 NPU 推理节拍，MPP/RTMP
+  未饱和。`infer_drop` 是容量为 1 的最新帧推理队列覆盖计数，符合当前低延迟设计，不能与编码/输出丢帧混淆。
+  两路 MQTT 已分别连接且配置为 `desk/dual/a`、`desk/dual/b`，本轮没有订阅 broker 保存 payload，故
+  `channel_id` 的消息级留证仍待补充。测试结束后两个 pipeline 正常停止，远端临时配置已清理，未改生产
+  V4L2 入口、模型、阈值或固定 RTMP 规则。
+- 本次首轮启动暴露并修复双路测试脚本的 SRS API 兼容问题：当前 SRS 将活动状态放在
+  `publish.active` 而非顶层 `active`；`run_multi_candidate_on_board.sh` 与隔离对比脚本均兼容两种
+  字段。当 HTTP API 不可达时，脚本改用 `ffprobe` 直接探测 RTMP 流，避免监控 API 故障误判成流故障。
+  下一步先补 MQTT payload 留证，再决定 4K+1080p 或三路扩容；暂不引入共享 NPU 调度。
+- 针对“是否只是源视频”的疑问，已从板端 B 路 FLV 在 60 秒位置抽帧核对：画面明确包含绿色检测框
+  与中文标签（杯子、书、鼠标），确认两路 PoC 实际执行了 RKNN 推理和编码叠框。`live/dual_a`、
+  `live/dual_b` 是原始输入地址，观看时不会有框；带框的网络结果仅为固定
+  `rtmp://192.168.0.168/live/alertgateway`，B 路结果仅保留在板端本地 FLV。
+- 2026-07-20 用户将结果推流规则更新为按通道独立的固定模板：
+  `rtmp://192.168.0.168/live/alertgateway_channel_{channel_id}`。旧平面单路配置继续使用
+  `alertgateway`；当前双路 PoC 使用通道 ID `1`、`2`，对应结果地址为
+  `alertgateway_channel_1`、`alertgateway_channel_2`。实现已移除“一进程最多一路 RTMP”的限制，改为校验每条
+  `fixed_rtmp` 输出严格等于通道模板地址且不重复；双路配置与启动脚本已同步，待重新交叉编译和板端双结果流实测。
+- 已完成规则修改后的 .200 板双路 1080p 180 秒实测：SRS 同时确认
+  `alertgateway_channel_1` 与 `alertgateway_channel_2` 均为 active 的 H.264 Main 1920×1080
+  推理结果流。末尾每路输出约 26.2--28.4 FPS、约 7.0--7.6 Mbps，`enc_drop=0`、
+  `out_drop=0`、`write_fail=0`；两路均正常结束。首次部署失败源于 `ChannelPipeline.cpp` 遗留旧单地址
+  校验，已改为与主入口一致的“单路 `alertgateway`、多路 `alertgateway_channel_{channel_id}`”规则并复测通过。
+- 2026-07-20 已完成第一项推理内存优化：`InferThread` 的普通推理和 ROI Tiling 不再先写临时
+  `input_buf` 再 `memcpy` 到 RKNN 输入 DMA 内存，而是让 RGA/CPU 回退路径直接写入
+  `input_mem_->virt_addr`，并在 `rknn_run` 前调用 `rknn_mem_sync(..., RKNN_MEMORY_SYNC_TO_DEVICE)`。
+  主机交叉编译、`git diff --check` 和脚本语法检查通过。随后重新部署到 `.200` 完成双路实流验证，
+  两路结果地址 `alertgateway_channel_1/2` 均正常 active；远端日志未出现 RGA、`rknn_mem_sync` 或
+  `rknn_run` 错误，`cpy` 阶段主要为约 0.1--0.5 ms 的 cache sync，不再是约 1.2 MB/帧的显式 memcpy。
+  当前仍保留采集帧副本、FFmpeg 解码到 NV12 的复制和 MPP 编码输入复制；下一步如继续优化，应先做
+  引用计数帧/缓冲池设计并单独验证生命周期，暂不直接改硬件解码链路。
+- 2026-07-20 已完成第二项帧复制优化：新增 `SharedByteBuffer`，`Frame::raw_data` 的底层
+  `std::vector<uint8_t>` 改为 `shared_ptr` 共享存储。V4L2 的 `mmap -> Frame` 仍保留一次必要复制，
+  但同一帧进入编码队列和推理队列时只复制 Frame 元数据/引用计数，不再复制整帧像素；FFmpeg 拉流
+  路径同样共享编码队列与推理队列的 NV12 存储。ROI Tiling 仍显式复制 tile，这是其独立推理输入所必需。
+  已兼容现有 `resize/data/size/empty/operator[]` 使用方式，交叉编译和 `git diff --check` 通过。
+  新二进制已部署到 `.200` 并完成双路实流验证：两路持续输出推理日志，末尾示例 channel 1 为约
+  29.7 FPS、约 7.87 Mbps，`enc_drop=0`、`out_drop=0`、`write_fail=0`、队列为 0；`cpy` 通常约
+  0.02--0.08 ms，未出现 RGA、RKNN 或帧生命周期错误。下一步可在需要时单独研究 V4L2/MPP DMA
+  buffer 直通；当前不继续扩大改动范围。
+- 2026-07-20 对 V4L2/MPP DMA 直通进行了实现前评估：当前 CMake 和源码未接入 FFmpeg RKMPP
+  硬件解码或 AVFrame DMA buffer，`PullStreamThread` 使用 FFmpeg 软件解码后转/拷贝为 NV12；V4L2
+  入口使用 YUYV `mmap`，而 `EncodeThread` 的 MPP 输入需要 NV12 DRM buffer。由于像素格式、内存
+  类型和缓冲区归还生命周期均不匹配，当前不直接实现跨模块 DMA 直通，避免破坏单路/多路稳定性。
+  后续若要继续，应先单独引入并验证 RKMPP 解码输出、DMABUF fd 传递、RGA/MPP 同步和异常回收，
+  形成独立实验分支后再合入主流程。
+- 2026-07-20 进一步在 `.200` 板使用真实 RTMP 输入短时探测 `h264_v4l2m2m`：FFmpeg 能识别该
+  解码器，但打开阶段报 `Could not find a valid device` / `No such device`，未能建立硬件解码会话。
+  因此当前不能把 V4L2 M2M 自动接入 `PullStreamThread`，否则会使现有拉流启动失败；继续保持
+  FFmpeg 软件解码路径。后续硬件解码需要先解决板端 V4L2 M2M 设备注册/驱动或引入可用的 RKMPP
+  FFmpeg 构建，再进行独立实验。
+- 2026-07-20 已实现第三项内存优化：新增 `FrameBufferPool`，由每个 `ChannelPipeline` 独立持有，
+  V4L2 和 FFmpeg 拉流生产路径复用已释放的同尺寸 `std::vector<uint8_t>`；池不阻塞采集，缓存不足时
+  自动分配，队列/消费者释放最后一个共享引用后才归还。保留旧的三参数 `CaptureThread` 构造兼容性，
+  未传池时自动创建本地池。已修正池回收策略：保留 vector size/capacity，同尺寸帧直接覆盖写入，避免
+  每帧 clear/resize 造成额外初始化。交叉编译和 `git diff --check` 通过；部署到 `.200` 后完成双路
+  实流验证，两路持续输出推理/编码/推流统计，未出现 RKNN/RGA 错误，正常窗口 `enc_drop=0`、
+  `out_drop=0`、`write_fail=0` 且队列无持续积压。当前池只复用 CPU 像素 vector，不改变 V4L2 到
+  Frame 的必要复制，也不改变 ROI Tiling 的独立 tile 复制。
+- 2026-07-20 已完成 ROI Tiling 的低复制路径改造：`InferThread::infer_once` 支持传入 `TileRect`，
+  RGA 使用原始帧的 `srect` 直接读取 tile 区域，并将结果写入 RKNN 输入 DMA 内存；只有 RGA 失败时
+  才调用原有 `TilingTask::crop()` 复制 tile 后回退。普通推理路径保持原行为，tile 检测结果仍按
+  tile 坐标偏移回整帧坐标。交叉编译和 `git diff --check` 通过；当前双路候选配置 ROI/Tiling 为关闭状态，
+  因此本次尚未完成启用 Tiling 的板端实流验收，后续需用专门开启 ROI/Tiling 的候选配置验证 NV12/YUYV
+  stride、边界和检测框坐标。
+- 2026-07-20 已新增单路 ROI 候选配置 `config/config_4k_roi_candidate_20260720.json`，并将根目录
+  `run.sh` 临时切换为“单路 4K + 全帧 ROI + 2 列 Tiling”入口，先于双路验证 ROI 逻辑。期间发现旧
+  `active_config` 入口不是递归继承，且 `config_4k_18mbps.json` 不含 model 字段；已让 ROI 候选显式
+  提供 4K source 和固定 `alertgateway` output，并继承完整候选模型配置，同时增强单路测试脚本的
+  SRS active 字段兼容和候选配置部署。
+- 已完成单路 ROI/Tiling 120 秒板端实流验证，日志目录为
+  `/tmp/alertgateway_4k_20260720_194119`。板端确认 `Running ROI Tiling with 2 tiles` 持续执行，
+  没有 RGA/RKNN 错误；正常窗口约 30 FPS、约 18 Mbps，`enc_drop=0`、`out_drop=0`、`write_fail=0`、
+  队列无持续积压，`active_tracks` 持续有检测目标。说明 RGA 直接读取 tile 区域、两 tile 推理、
+  坐标还原和整帧编码推流链路已跑通。当前 `run.sh` 保持单路 ROI 默认，待确认后再切回双路多通道。
+- 用户提出大目标跨 tile 边界可能产生左右两个检测框，已在
+  `docs/4k/单路双路多路兼容开发计划.md` 新增边界目标处理计划：先比较 20%/30% tile overlap，
+  再实现相邻 tile、同类别、靠近共同边界框的安全联合与全局 NMS，最后才评估整帧低频补检。当前
+  尚未修改默认检测合并规则，先按单路基线→重叠率→边界联合→双路的顺序验证，避免增加 NPU 负载后
+  无法区分收益来源。
+- 随后已实现第一版跨 tile 边界框联合：`TiledDetection` 保留 tile 归属，左右/上下相邻 tile 中
+  同类别、贴近共同边缘、正交重叠至少 45%、边界间距不超过 96 像素的框先做 union，再做全局 NMS；
+  日志输出 `ROI boundary merges=N`。已部署并完成单路 4K + 2 tile 短时实流验证，日志多次出现
+  `ROI boundary merges=1`，末尾约 30 FPS，`enc_drop=0`、`out_drop=0`、`write_fail=0`。当前只证明
+  合并路径实际执行且推流稳定，尚未完成相邻真实目标的误合并率测试；下一步应补充边界样本对比，
+  再决定是否提高 overlap_ratio 到 20%/30%。
+- 用户继续发现整帧复检与 tile 结果可能出现“大框套小框”。已在 `TilingTask::merge()` 增加同类别
+  containment NMS：交集/较小框面积达到 `0.70` 且小框中心在大框内时抑制重复框，分数接近时保留
+  更大框，不同类别不抑制。单路 ROI 实流复测已通过：整帧复检、边界合并均持续执行，正常窗口约
+  30 FPS，`enc_drop=0`、`out_drop=0`、`write_fail=0`。当前仍需用两个相邻同类真实目标样本做
+  误合并验收，不能仅凭单一视频确认所有场景。
+- 2026-07-20 已完成 containment NMS 版本的单路 4K + ROI/Tiling 180 秒播放测试，日志目录为
+  `/tmp/alertgateway_4k_20260720_203815`。测试期间结果流为固定
+  `rtmp://192.168.0.168/live/alertgateway`，整帧复检和 `ROI boundary merges=1` 持续执行；末尾
+  统计约 30 FPS、约 17.8--18.2 Mbps，`enc_drop=0`、`out_drop=0`、`write_fail=0`、队列无持续积压。
+  测试结束后输入发布和板端进程已清理；播放地址当前不再 active，下一次观看需重新启动测试入口。
+- 用户实测仍反馈手机、笔记本偶发重叠。复核后确认编码器叠框读取的是 `SharedDetections` 的跟踪快照，
+  重复检测可能在前一帧分别建立两个 track，后续即使原始 tile 框被抑制，旧 track 仍会在 `display_hold_ms`
+  窗口内同时显示。已在 `SharedDetections::publish_snapshot()` 增加最终显示层同类别去重：按 IoU、包含关系，
+  以及正交重叠至少 45% 且间隔不超过 96 像素的近邻框合并/抑制；不同类别不处理。去重只影响编码显示快照，
+  不改变跟踪器关联状态。交叉编译通过，并完成板端 45 秒实流验证，日志目录为
+  `/tmp/alertgateway_4k_20260720_205323`；ROI 边界合并和整帧重复抑制均持续执行，推流链路无编码/推流错误。
+  仍需用户在手机、笔记本实际重叠片段上观看复核；若仍有重叠，应抓取该帧的显示框坐标，进一步区分是两个
+  同类 track、不同类别框，还是播放器/旧流缓存导致。
+- 针对用户反馈的“手机/笔记本偶发重叠框”，已继续增加 tile 结果与整帧复检结果之间的跨来源抑制：
+  `TilingTask::suppress_tile_duplicates()` 仅处理同类别，要求 tile 框与整帧框交集占 tile 框面积至少
+  `0.20` 且中心距离不超过较小框尺度的 `0.55`，命中时删除 tile 框、保留整帧框；不同类别不抑制。
+  这样整帧框作为完整目标结果优先，避免手机/笔记本被 tile 边缘结果重复绘制。已重新交叉编译并完成
+  单路 4K + ROI/Tiling 45 秒板端实流验证，日志目录为 `/tmp/alertgateway_4k_20260720_204739`，
+  多次出现 `full-frame suppressed tile duplicates=1/2`，同时 `ROI boundary merges=1`，说明新抑制路径
+  实际生效且推流链路稳定；仍需用手机、笔记本相邻/跨边界的真实片段做画面级复核，确认不会误删两个独立同类目标。
+- 根据用户进一步分析，已将处理重点前移到 Tracker 之前：`TilingTask::make_tiles()` 不再使用旧的比例
+  放大后再 clamp 的方式，而是按 ROI 尺寸计算 384--512 像素（当前 4K ROI 约 448 像素）的明确左右/上下
+  tile overlap；`merge_boundary_detections()` 增加 IoS（交集/较小框面积）至少 `0.35` 的重叠区去重，
+  两个框清晰度差异明显时优先保留离 tile 边缘更远的框，接近时 union。边界复检由原来的 full-frame
+  `infer_once(frame, nullptr)` 改为当前 ROI 的 `infer_once(frame, &roi_rect)`，坐标还原后与 tile 结果
+  融合，再统一 `merge()`，最后才调用 `shared_dets_.update()` 进入 Tracker。已移除此前增加的最终显示层
+  去重，避免继续依赖 Tracker 后补救。交叉编译和 `git diff --check` 通过；下一步必须重新部署并用播放器
+  观察手机/笔记本片段，且要确认测试脚本确实保存了非空板端日志。
+- 2026-07-20 针对仍偶发的手机/笔记本重框，已完成第二版 Tracker 前融合：不再根据 tile 物理外边缘决定
+  是否复检，而是仅对两个相邻 tile 的公共重叠带内、同类别、正交方向重合的候选对生成联合 ROI；联合 ROI
+  覆盖两个半框及周边上下文，复检后的完整框在 `SharedDetections::update()` 前替换覆盖它的 tile 半框。跨来源
+  抑制取消了会误拒绝“半框 + 完整框”的中心距离限制，改为 tile/full 覆盖率至少 50% 或 IoS 至少 35%。
+  `overlap_ratio` 重新参与 384--512 像素 overlap 计算，便于后续单变量调整。新增 image_processing_smoke 的
+  4K 几何与替换回归断言；交叉 `cmake --build build -j4` 与 `git diff --check` 通过。尚未部署到板端，
+  不能宣称手机/笔记本视觉问题已解决；下一步须部署后观察日志 `ROI overlap candidates`、
+  `joint-ROI suppressed tile duplicates` 并人工观看跨缝片段。
+- 2026-07-20 已部署第二版融合并完成两次板端实流。首轮 120 秒逻辑已实际触发 636 次联合 ROI、
+  634 次 tile 重复框抑制，链路正常结束；同时发现动态联合 ROI 仅偶数对齐，RK3588 RGA 的 NV12
+  裁剪要求宽度/起点 16 对齐，导致复检大量回退 CPU。已将联合 ROI 横向向外对齐到 16 像素，并令
+  letterbox 目标矩形保持偶数尺寸/起点，重新交叉编译和部署。后续 45 秒复测日志
+  `/tmp/alertgateway_4k_20260720_215021/board.log`：联合 ROI 319 次、tile 重复抑制 319 次、
+  `RGA letterbox failed=0`，稳定窗口约 30 FPS、18 Mbps，`enc_drop=0`、`out_drop=0`、
+  `write_fail=0`，正常 `Done`。这验证了新融合和 RGA 路径，不构成手机/笔记本画面级最终验收；
+  下一步应由用户观看固定结果流中的跨缝片段确认是否仍有重框。
+- 2026-07-20 根据用户明确的 Tracker 输入约束，已将 `merge_boundary_detections()` 改为全局分割线融合：
+  所有 tile 框先映射回整帧坐标；相邻 tile 的同类框仅在靠近公共分割线、正交方向重叠至少 45%、
+  平行方向间隙不超过 96 像素时直接 union，随后才执行联合 ROI 复检、全局 NMS、ROI filter 和
+  `SharedDetections::update()`。不再以 tile 物理外边缘作为首段融合条件。新增 smoke 断言验证两个
+  4K tile 半框直接融合为一个框。交叉构建和 `git diff --check` 通过；45 秒板端复测日志
+  `/tmp/alertgateway_4k_20260720_215644/board.log` 显示 `ROI boundary merges=317`、联合 ROI 320 次、
+  RGA 失败 0，稳定窗口约 30 FPS/18 Mbps，`enc_drop/out_drop/write_fail=0` 且正常 `Done`。这证明
+  Tracker 前融合路径已实际执行，仍需用户肉眼确认跨缝手机/笔记本是否不再重框。
+- 2026-07-21 新增渲染前重叠审计：`EncodeThread` 在从 `SharedDetections` 取得最终显示快照后、实际绘制
+  前，对全部框两两计算交集；检测到交集面积大于 `stream.render_overlap_min_intersection_area_px`（默认 1）时
+  输出 `[RenderOverlap]`，包含通道、视频/检测帧和 PTS、两框类别/置信度/坐标、交集矩形与面积、IoU 和
+  IoS。该机制默认开启（`stream.render_overlap_audit=true`），且同一检测快照只记录一次以避免编码帧重复刷屏；
+  它完全只读，不改变 NMS、Tile 融合、Tracker 或渲染内容。4K ROI 候选配置已显式开启，下一步应部署并根据
+  `[RenderOverlap]` 日志区分同类/异类及框来源时序，再针对实际原因调整上游逻辑。
+
+## 2026-07-21 SRS 测试前置与启动实例核验
+
+- 主机只读核验确认当前 Windows SRS 健康：实际进程为
+  `D:\Tool\SRS 5.0\SRS\objs\srs.exe -c conf\\console.conf`，TCP 1935 和 1985 均由该进程监听，
+  `http://192.168.0.168:1985/api/v1/streams/` 返回 HTTP 200；当前无活动流。当前 Windows TCP
+  排除范围已不包含历史记录中的 7998--8097，历史 8080 bind 问题属于此前配置状态，不应当作为当前
+  监听事实继续使用。
+- 当前单路/双路测试脚本不会启动或停止 SRS。`run_4k_candidate_on_board.sh` 在启动 FFmpeg 发布端、
+  SSH 板端进程之前先检查 SRS API；没有 SRS 时的报错是有意的前置失败，脚本自身没有机会占用
+  Windows 的 1935/1985 服务端口。脚本退出清理的对象仅是本次启动的 FFmpeg、板端 AlertGateway
+  和本地 API 轮询子进程。
+- Windows 存在两个不同启动入口：用户 Startup 中的 `SRS AutoStart.cmd` 使用 `console.conf`，
+  SRS 自带 `srs-live.bat` 使用 `live.conf`；两者都监听 RTMP 1935 和 HTTP API 1985，不能同时运行。
+  后续只保留一个规范启动入口，并用实际进程 CommandLine 判断生效配置，避免把重复 bind 误认为测试造成的故障。
+- 同日复现：主动关闭 SRS 后直接执行当前 `run.sh`，脚本在 `1985` API 检查阶段等待约 5 秒后退出码为 1；
+  此时尚未启动 FFmpeg 发布端、SSH 板端进程或 AlertGateway，且仅留下本次调试目录。该实测排除了“测试
+  先占用 SRS 端口再导致桌面 SRS 启动失败”的因果关系。
+- 用户提出待重启验证假设：开机后 SRS 自动启动尚未完成或尚未启动时直接执行测试，可能造成“测试先报错、
+  随后手动启动 SRS 失败”的时间顺序假象。该假设尚未证实；下次重启后应先分别记录 `srs.exe` 进程、
+  Windows TCP 1935/1985 监听和 API 返回状态，再执行测试，重点区分开机自启时序问题与重复启动实例问题。
+- 2026-07-21 已按用户决定将测试流程改为“用户手动启动 SRS，测试脚本只检查和等待”。新增
+  `tools/test/check_srs_manual.sh`：在任何 FFmpeg 发布端、板端 AlertGateway 或测试进程启动前，
+  同时检查 SRS API `1985` 与 RTMP `1935`；未就绪时暂停等待用户手动启动后按 Enter 重试，输入 `q` 退出。
+  4K、单进程多通道、双进程双路、独立发布和拉流重连入口均接入该闸门，脚本没有启动、重启或停止 SRS 的逻辑。
+  Windows 启动项属于仓库外状态，本次未擅自修改；若要求完全禁止开机自启，仍需在 Windows 上手动禁用
+  `SRS AutoStart.cmd`，并避免同时运行 `srs-live.bat`。
+- 同日直接在未启动 SRS 的环境运行 `./run.sh` 验证：脚本完成本地视频 `ffprobe` 后停在 SRS 前置检查，
+  明确报告 API `1985` 与 RTMP `1935` 均不可达，并等待手动启动/Enter 或 `q`；输入 `q` 后以预期的非零状态退出。
+  期间未进入板端部署、FFmpeg 发布或 AlertGateway 启动阶段；仅清理阶段创建了 0 字节 `board.log` 证据文件。
+- 随后用户手动启动 SRS 后再次运行 `./run.sh`，完成 120 秒单路 4K ROI/Tiling 实流验证，日志目录为
+  `/tmp/alertgateway_4k_20260721_132506`。SRS 前置检查通过，输入 `live/testsrc2` 与结果
+  `live/alertgateway` 均 active；SRS 快照确认输入 H.264 High 3840×2160、约 39--40 Mbps，输出
+  H.264 Main 3840×2160、约 18 Mbps。稳定窗口约 30 FPS，`enc_drop=0`、`write_fail=0`、队列无持续积压，
+  `ROI Tiling with 2 tiles`、边界合并和联合 ROI 抑制均实际执行；首个统计窗口有一次 `out_drop=1`，后续稳定窗口为 0。
+  测试以退出码 0 完成，FFmpeg 与板端进程均由脚本清理，SRS 保持运行但结果流随后变为 inactive。日志仍出现
+  `[RenderOverlap]` 审计记录，故本轮只能判定 4K 推理/编码/推流链路通过，不能宣称视觉重叠框问题已解决。
+
+## 2026-07-21 ROI 重叠框定位与收敛
+
+- 对 `/tmp/alertgateway_4k_20260721_132506/board.log` 的渲染前审计分类确认：问题同时包含同类重复轨迹和跨类别近同框误检。低 IoU 的手机/书本、手机/键盘以及笔记本/内置键盘等关系不能按 IoS 一刀切，否则会误删合法嵌套或相邻目标。
+- `TilingTask::merge()` 新增类别无关的近同框抑制：仅当不同类别 IoU 至少 `0.85` 时保留高分框；同类别仍使用已有 NMS/包含规则。该规则放在 Tracker 前，并在 `InferThread` 输出 `cross-class near-duplicate suppression=N` 便于审计。
+- `SharedDetections` 新增三层窄范围处理：同类别高 IoS 且中心包含时允许跨帧复用轨迹；跨类别 IoU 至少 `0.85` 时允许类别切换复用轨迹；更新末端合并已经形成的重复轨迹，并在最终显示快照再做同样条件的安全去重。低 IoU 框不受影响。
+- `tools/benchmark/image_processing_smoke.cpp` 增加同类跨帧包含、跨类近同框、同一更新内重复轨迹和显示快照去重断言。交叉编译通过，ARM64 板端 `image_processing_smoke: OK`。
+- 最新二进制已部署到 `firefly@192.168.0.200:~/AlertGateway/AlertGateway`。最后一轮 60 秒实流日志为 `/tmp/alertgateway_4k_20260721_140018/board.log`：`RenderOverlap=809`，同类别 `IoS>=0.70` 为 `0`，跨类别 `IoU>=0.85` 为 `0`；ROI 边界合并 437 次、联合 ROI 抑制 437 次、跨类别近同框抑制 53 次。稳定窗口约 30 FPS、约 18 Mbps，`enc_drop=0`、`out_drop=0`、`write_fail=0`，测试退出码 0。
+- 仍会有低 IoU 的交集审计记录；它们不等同于重复框，后续若用户在播放器发现具体误叠，应以对应 `[RenderOverlap]` 坐标判断是否为真实相邻目标、模型误检或播放器旧缓存。当前测试只清理本次 FFmpeg/板端进程，SRS 未被测试启动、重启或停止。
+
+## 2026-07-21 ROI 最终单框竞争逻辑
+
+- 用户确认最终展示对同一位置的大小/类别竞争框只保留一个；不能按框面积或原始分数直接取舍，因为 tile 小框可能只是半个物体。实现保留候选来源：联合 ROI 复检优先于 tile，两个 tile 候选再优先离 tile 边缘更远者，最后才比较置信度。
+- `TilingTask` 的边界融合结果不再丢弃 tile 元数据；联合 ROI 检测以 `JointRecheck` 来源加入。在 Tracker 前新增 `select_exclusive_candidates()`：跨类别近同框（IoU >= 0.85）或小框中心被大框包含且 IoS >= 0.50 时构成互斥组，只输出优先级最高的一个，并输出 `[Infer] ROI exclusive suppression=N`。
+- `SharedDetections` 对同样的跨类别竞争关系不再立即切换类别：首帧把挑战者挂在既有轨迹上且不创建第二个框，连续两帧兼容后才受控切换；最终快照和重复轨迹清理也使用同一规则兜底。这样可避免手机/笔记本等大小框在相邻检测帧间来回跳动。
+- `image_processing_smoke` 覆盖联合复检优先、强包含只保留一个框，以及跨类别第 1 帧保持旧框、第 2 帧才切换；交叉编译通过，已在 ARM64 板端执行并输出 `image_processing_smoke: OK`。最新二进制已部署到 `firefly@192.168.0.200:~/AlertGateway/AlertGateway`。
+- 使用已手动启动的 SRS 进行 ROI 实流检查时，日志 `/tmp/alertgateway_4k_20260721_143208/board.log` 出现 77 次 `ROI exclusive suppression`，说明新候选互斥层已实际执行；链路统计稳定在约 30 FPS、约 18 Mbps，`enc_drop=0`、`out_drop=0`、`write_fail=0`。该轮旧的 0.60 IoS 版本仍记录到 IoS 约 0.50 的跨类别竞争框，因此门槛随后已收紧为 0.50 并重新完成板端冒烟测试；应在下一次播放器 A/B 中重点核对该边界案例。测试脚本只检查 SRS 是否已手动启动，未启动、停止或重启 SRS。
